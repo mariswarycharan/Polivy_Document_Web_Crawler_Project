@@ -27,7 +27,7 @@ except ImportError:  # pragma: no cover
 from crawler_config import (RELATED_DOMAIN_NO_BRAND_EXTRA, SITEMAP_DOC_MIN_SCORE, SITEMAP_EXPLORE_AFFILIATED, SITEMAP_PAGE_CAP, SITEMAP_PAGE_MIN_SCORE, PARALLEL_PAYERS, STOP, PREFETCH_AHEAD, BROWSER_RETRY_ON_BOT_CHALLENGE, COLUMNS, DOC_CANDIDATE_MIN_SCORE, DOC_DONE_STATES, ENUMS, EXTERNAL_DOC_MIN_SCORE, EXTRA_START_URLS, HOMEPAGE_URL, HUB_INHERIT_MAX_BONUS, HUB_INHERIT_MIN_SCORE, KNOWN_PATTERN_MIN_DOCS, LLM_FOR_MISSING_FIELDS, MAX_DEPTH, MAX_DOCUMENTS_PER_PAYER, MAX_PAGES_PER_PAYER, MAX_PARSE_BYTES, MAX_RENDERS_PER_PAYER, MAX_SITEMAP_FILES, MAX_SITEMAP_URLS, MAYBE_DOC_MIN_SCORE, NAV_FOLLOW_MIN_SCORE, NOTES_MAX_CHARS, OLLAMA_MODEL, OUTPUT_DIR, PAGE_DONE_STATES, PAGE_FOLLOW_MIN_SCORE, PAYER_NAME, PAYER_REGISTRY, ProgressUI, RELATED_DOMAIN_DEPTH_BUDGET, RELATED_DOMAIN_MIN_SCORE, RESET_PAYER_STATE, REVISION_POLICY, RUN_ALL_PAYERS, SAVE_DOCUMENT_FILES, SEED_LIST_CSV, STATE_DB, STATE_JOINER, STATE_NATIONAL, UNFETCHED_DOC_ROW_MIN_SCORE, log, setup_logging, utc_now_iso)
 from crawler_io import (Browser, FetchResult, Fetcher, Inspection, Link, RenderResult, VIA_BY_ORIGIN, extract_links, inspect_content, inspect_html, is_auth_block, links_from_json, needs_js, sniff_file_type)
 from crawler_state import (LLMClassifier, PolicyRow, StateDB, load_schema_dictionary)
-from crawler_text import (DOC_EXTS, THIRD_PARTY_BLOCKLIST, classify_doc_type, clean_anchor, clean_text, content_fingerprint, detect_lob, detect_state, extract_dates, extract_policy_number, html_policy_evidence, is_cdn_host, is_good_title, join_notes, link_kind, normalize_url, parse_date, reg_domain, register_brands, score_link, sha256_hex, short_url, text_fingerprint, title_from_filename, trim_title, url_ext, url_key, url_words)
+from crawler_text import (header_negative, doc_type_hint, type_keyword_hit, DOC_EXTS, THIRD_PARTY_BLOCKLIST, classify_doc_type, clean_anchor, clean_text, content_fingerprint, detect_lob, detect_state, extract_dates, extract_policy_number, html_policy_evidence, is_cdn_host, is_good_title, join_notes, link_kind, normalize_url, parse_date, reg_domain, register_brands, score_link, sha256_hex, short_url, text_fingerprint, title_from_filename, trim_title, url_ext, url_key, url_words)
 
 
 # =============================================================================
@@ -521,8 +521,15 @@ class PayerCrawler:
                 if sc >= threshold:
                     self._enqueue_doc(l.url, kind, sc, sig, page_url, path, depth, l.anchor, l.heading, page_ctx, hints, route)
                 elif sc > -3:
-                    self.db.skip_link(self.name, l.url, page_url, l.anchor, sc, hub_score,
-                                      "external_host_low_score" if external else "low_score")
+                    threshold_val = DOC_CANDIDATE_MIN_SCORE if kind == "doc" else MAYBE_DOC_MIN_SCORE
+                    if external:
+                        threshold_val = max(threshold_val, EXTERNAL_DOC_MIN_SCORE)
+
+                    reason_text = (f"Link score ({sc:.2f}) is below the minimum threshold ({threshold_val:.2f}) "
+                                   f"required for {'an external host' if external else 'this document type'}. "
+                                   f"Anchor text: '{clean_anchor(l.anchor)[:100]}'.")
+
+                    self.db.skip_link(self.name, l.url, page_url, l.anchor, sc, hub_score, reason_text, l.heading, page_ctx)
                 continue
             if kind == "sitemap" or budget <= 0 or depth > MAX_DEPTH:
                 continue
@@ -561,7 +568,7 @@ class PayerCrawler:
         if self.db.doc_accepted(self.name, url_key(page_url)):
             return True
         ins = inspect_html(html.encode("utf-8", "ignore"), page_url, self.alias)
-        is_doc, cscore, csig = html_policy_evidence(ins)
+        is_doc, cscore, csig = html_policy_evidence(ins, page_url)
         if not is_doc:
             return False
         doc_item = dict(item)
@@ -598,7 +605,7 @@ class PayerCrawler:
             html = r.content.decode(_charset(r.content_type) or "utf-8", "ignore")
             links, ctx = extract_links(html, r.final_url or url)
             self._enqueue_links(item, links, ctx, r.final_url or url, extra_step="")
-            is_doc, cscore, csig = html_policy_evidence(ins)
+            is_doc, cscore, csig = html_policy_evidence(ins, r.final_url or url)
             if not is_doc:
                 self.db.finish(self.name, key, "rejected", "html_landing_or_index_page")
                 return
@@ -637,7 +644,8 @@ class PayerCrawler:
         title = anchor if is_good_title(anchor, self.alias) else title_from_filename(url)
         own = " ".join([anchor, url_words(url)])
         around = " ".join(x for x in [item.get("heading") or "", item.get("page_ctx") or ""] if x)
-        dtype, _, reimb = classify_doc_type(own, around=around)
+        _ht, _hk, _htier = doc_type_hint(own)
+        dtype, _, reimb = classify_doc_type(own, around=around, boost=_ht if _htier == "title" else "")
         lob, _ = detect_lob(own, "", around)
         state, ssrc = detect_state(url, own, "", around, self.footprint)
         # document_url: the final URL after redirects, unless the redirect went to a login page / error host
@@ -687,7 +695,10 @@ class PayerCrawler:
         def reject(reason: str) -> None:
             decision.update({"verdict": "reject", "reason": reason})
             self.db.save_doc(self.name, doc_key, document_url, False,
-                             {"document_url": document_url, "anchor": anchor, "source_page_url": item.get("source_page_url", "")},
+                             {"document_url": document_url, "anchor": anchor, "source_page_url": item.get("source_page_url", ""),
+                              "document_title": clean_text(ins.heading_title or (ins.titles[0] if ins.titles else "") or ins.meta_title
+                                                           or anchor, 300),
+                              "file_type": ins.file_type},
                              decision, item.get("route", ""))
             if not skip_finish:
                 self.db.finish(self.name, key, "rejected", reason)
@@ -713,7 +724,10 @@ class PayerCrawler:
             penalty += 0.05
 
         # -------- decision (Gate 1 + Gate 2, Gate 3 when ambiguous)
-        verdict, conf, reason = self._decide(ls, cscore, ins.readable)
+        own0 = " ".join(x for x in [ins.heading_title, " ".join(ins.titles), ins.meta_title, anchor, url_words(document_url)] if x)
+        hint_type, hint_kw, hint_tier = doc_type_hint(own0, around)
+        decision["type_hint"] = f"{hint_type}:{hint_kw}:{hint_tier}" if hint_type else ""
+        verdict, conf, reason = self._decide(ls, cscore, ins.readable, hint_tier, min(header_negative(ins.text or ""), header_negative(own0, 400)))
         llm_res = None
         if verdict == "ambiguous":
             title_guess = ins.heading_title or (ins.titles[0] if ins.titles else "") or anchor
@@ -749,7 +763,8 @@ class PayerCrawler:
         pnum, psrc = extract_policy_number(text, title, ins.margin_text)
         if not pnum and hints.get("policy_number"):
             pnum, psrc = clean_text(str(hints["policy_number"]), 30), "json"
-        dtype, _dsrc, reimb = classify_doc_type(own, header, body, around, pnum)
+        boost = hint_type if (hint_tier == "title" or (hint_tier == "listing" and cscore < 3)) else ""
+        dtype, _dsrc, reimb = classify_doc_type(own, header, body, around, pnum, boost=boost)
         lob, lsrc = detect_lob(own, header, around)
         state, ssrc = detect_state(document_url, own, header, around, self.footprint)
         if LLM_FOR_MISSING_FIELDS and ins.readable and not llm_res and (lob == "Unknown" or (dtype == "other" and not reimb)):
@@ -843,8 +858,11 @@ class PayerCrawler:
         log(logging.DEBUG, "document_accepted", payer=self.name, type=dtype, conf=round(conf, 2), title=title[:80], url=document_url)
 
     @staticmethod
-    def _decide(ls: float, cs: float, readable: bool) -> tuple[str, float, str]:
-        if cs <= -4:
+    def _decide(ls: float, cs: float, readable: bool, hint_tier: str = "", hdr_neg: float = 0.0) -> tuple[str, float, str]:
+        # A provider manual / bulletin / PA document whose title or link text carries a type keyword is judged on how it OPENS:
+        # its table of contents may cross-reference "Member Handbook", "Evidence of Coverage" or "Notice of Privacy Practices"
+        # (each scores negative), which must not sink it. It is rejected only if its opening text itself looks like one of them.
+        if (hdr_neg <= -4) if hint_tier else (cs <= -4):
             return "reject", 0.0, "negative content fingerprint (privacy notice, EOC, press release ...)"
         if cs >= 6:
             return "accept", 0.80 + min(0.15, (cs - 6) * 0.015 + (0.05 if ls >= 4 else 0)), "strong content fingerprint"
@@ -854,6 +872,10 @@ class PayerCrawler:
             return "accept", 0.68, "strong link context, weak content confirmation"
         if not readable and ls >= 6:
             return "accept", 0.52, "strong link context; content not machine-readable, not verified"
+        if hint_tier == "title" or (hint_tier == "listing" and (cs >= 1 or not readable)):
+            return ("accept", round(0.62 + (0.04 if cs >= 2 else 0.0) + (0.02 if ls >= 4 else 0.0), 2),
+                    "document-type keywords in the title / link text" if hint_tier == "title"
+                    else "document-type keywords in the listing page heading; content consistent")
         if cs >= 2 or ls >= 3:
             return "ambiguous", 0.0, "mixed evidence"
         return "reject", 0.0, "no policy evidence"
@@ -900,12 +922,25 @@ class PayerCrawler:
 # =============================================================================
 # 16. EXPORT - URL de-duplication, near-duplicate collapse, revisions, run summary, QA
 # =============================================================================
-REMOVED_COLUMNS = ["payer_name", "rule", "kept_document_url", "removed_document_url", "content_hash_sha256", "detail"]
+REMOVED_COLUMNS = [
+    "payer_name", "rule", "reason", "kept_document_url", "kept_title", "kept_confidence",
+    "removed_document_url", "removed_title", "removed_confidence", "content_hash_sha256"
+]
 
 
-def _removed(keep: dict, r: dict, rule: str, detail: str = "") -> dict:
-    return {"payer_name": r["payer_name"], "rule": rule, "kept_document_url": keep["document_url"],
-            "removed_document_url": r["document_url"], "content_hash_sha256": r.get("content_hash_sha256", ""), "detail": detail}
+def _removed(keep: dict, r: dict, rule: str, reason: str = "") -> dict:
+    return {
+        "payer_name": r["payer_name"],
+        "rule": rule,
+        "reason": reason,
+        "kept_document_url": keep["document_url"],
+        "kept_title": keep.get("document_title", ""),
+        "kept_confidence": keep.get("confidence_score", ""),
+        "removed_document_url": r["document_url"],
+        "removed_title": r.get("document_title", ""),
+        "removed_confidence": r.get("confidence_score", ""),
+        "content_hash_sha256": r.get("content_hash_sha256", "")
+    }
 
 
 def _completeness(r: dict) -> int:
@@ -949,7 +984,7 @@ def _merge_into(keep: dict, others: list[dict]) -> None:
     _add_note(keep, f"same document also at {len(urls)} other URL(s): {shown}")
 
 
-def _collapse(rows: list[dict], keyfn: Callable[[dict], Any], rule: str, removed: list[dict]) -> list[dict]:
+def _collapse(rows: list[dict], keyfn: Callable[[dict], Any], rule: str, reason: str, removed: list[dict]) -> list[dict]:
     groups: dict[Any, list[dict]] = defaultdict(list)
     for r in rows:
         k = keyfn(r)
@@ -964,7 +999,7 @@ def _collapse(rows: list[dict], keyfn: Callable[[dict], Any], rule: str, removed
         _merge_into(keep, others)
         for o in others:
             drop.add(id(o))
-            removed.append(_removed(keep, o, rule))
+            removed.append(_removed(keep, o, rule, reason))
     return [r for r in rows if id(r) not in drop]
 
 
@@ -1074,7 +1109,12 @@ def _revisions(rows: list[dict], removed: list[dict]) -> list[dict]:
             if REVISION_POLICY == "latest_only" and older:
                 drop.add(id(r))
                 n_dropped += 1
-                removed.append(_removed(ref, r, "superseded_revision", f"{label}: {status}"))
+                if r in live or not live:
+                    reason_text = (f"Superseded by a newer revision of {label}. The kept document is dated {top[0] or 'n/a'} "
+                                   f"(field: {fld or 'year/version hints'}). {status}.")
+                else:
+                    reason_text = f"Archived / historical copy of {label}; the current version is kept. {status}."
+                removed.append(_removed(ref, r, "superseded_revision", reason_text))
                 continue
             _add_note(r, f"revision group ({len(g)} versions of {label}, compared on {fld or 'year/version hints'}): {status}")
         if n_dropped:
@@ -1105,16 +1145,22 @@ def build_rows(db: StateDB) -> tuple[list[dict], list[dict]]:
         k = url_key(r["document_url"])
         if k in seen:
             keep = seen[k]
-            removed.append(_removed(keep, r, "same_url_key" if keep["payer_name"] == r["payer_name"] else "same_url_key_cross_payer"))
+            rule_name = "same_url_key" if keep["payer_name"] == r["payer_name"] else "same_url_key_cross_payer"
+            reason_text = "Identical URL path/query (ignoring tracking parameters, case, and www). Kept the highest-ranked version."
+            removed.append(_removed(keep, r, rule_name, reason_text))
             continue
         seen[k] = r
         kept.append(r)
     rows = kept
     ok = lambda r: r["requires_auth"] == "N" and bool(r["content_hash_sha256"])
     # 2) same bytes at several URLs, 3) same normalised text, 4) same canonical URL
-    rows = _collapse(rows, lambda r: (r["payer_name"], r["content_hash_sha256"]) if ok(r) else None, "identical_sha256", removed)
-    rows = _collapse(rows, lambda r: (r["payer_name"], r["_fp"]) if ok(r) and r["_fp"] else None, "identical_text", removed)
-    rows = _collapse(rows, lambda r: (r["payer_name"], r["_canon"]) if r["_canon"] else None, "same_canonical_url", removed)
+    rows = _collapse(rows, lambda r: (r["payer_name"], r["content_hash_sha256"]) if ok(r) else None, "identical_sha256",
+                     "Identical file content (exact SHA-256 hash match). Kept the version with better ownership/status.", removed)
+    rows = _collapse(rows, lambda r: (r["payer_name"], r["_fp"]) if ok(r) and r["_fp"] else None, "identical_text",
+                     "Identical extracted text content (near-duplicate). Kept the primary version.", removed)
+    rows = _collapse(rows, lambda r: (r["payer_name"], r["_canon"]) if r["_canon"] else None, "same_canonical_url",
+                     "Both URLs share the same HTML <link rel='canonical'> tag. Kept the canonical version.", removed)
+
     # 5) dated revisions
     rows = _revisions(rows, removed)
     for r in rows:
@@ -1184,6 +1230,8 @@ def summarize(db: StateDB, payer: str, rows: list[dict], removed: list[dict]) ->
         "pending": g(("page", "doc", "maybe_doc"), ("pending", "in_progress")),
         "found_by_route": json.dumps(routes, sort_keys=True),
         "sitemap_share_pct": round(100 * routes.get("sitemap", 0) / found, 1) if found else 0.0,
+        "rows_provider_manual": types.get("provider_manual", 0), "rows_bulletin": types.get("bulletin", 0),
+        "rows_pa_form": types.get("pa_form", 0), "rows_pa_list": types.get("pa_list", 0),
         "rows_by_document_type": json.dumps(dict(sorted(types.items()))),
         "related_domains": json.dumps(db.get(payer, "related_domains", [])),
         "summary_timestamp_utc": utc_now_iso(),
@@ -1262,6 +1310,34 @@ def _write_csv(data: list[dict], columns: list[str], filepath: str) -> None:
             writer.writerow({c: row.get(c, "") for c in columns})
 
 
+def _write_type_keyword_audit(db: StateDB) -> None:
+    """type_keyword_audit.csv: every candidate whose link text / title / URL carries a provider-manual, bulletin or
+    prior-authorization keyword, and what happened to it. If these types are missing from the output, this file says where
+    each candidate was lost (skipped at the link stage, rejected after download, or accepted and as which type)."""
+    out: list[dict] = []
+    for r in db.con.execute("SELECT payer, url, anchor, heading, score, reason FROM skipped_links"):
+        kt, kw = type_keyword_hit(f"{r['anchor'] or ''} {url_words(r['url'])}")
+        if not kt:
+            kt, kw = type_keyword_hit(r["heading"] or "")
+        if kt:
+            out.append({"payer_name": r["payer"], "document_url": r["url"], "keyword_type": kt, "matched_keyword": kw,
+                        "outcome": "skipped at the link stage (never downloaded)", "document_type": "",
+                        "link_score": r["score"], "content_score": "", "reason": r["reason"]})
+    for r in db.con.execute("SELECT payer, document_url, accepted, row_json, decision FROM documents"):
+        row, dec = json.loads(r["row_json"] or "{}"), json.loads(r["decision"] or "{}")
+        title = row.get("document_title", "") or row.get("anchor", "")
+        kt, kw = type_keyword_hit(f"{title} {row.get('anchor', '')} {url_words(r['document_url'])}")
+        if not kt and row.get("document_type") not in ("provider_manual", "bulletin", "pa_form", "pa_list"):
+            continue
+        out.append({"payer_name": r["payer"], "document_url": r["document_url"], "keyword_type": kt or "", "matched_keyword": kw,
+                    "outcome": "accepted" if r["accepted"] else "rejected after download",
+                    "document_type": row.get("document_type", ""), "link_score": dec.get("link_score", ""),
+                    "content_score": dec.get("content_score", ""),
+                    "reason": dec.get("reason", "") if not r["accepted"] else (dec.get("type_hint") or "")})
+    if out:
+        _write_csv(out, list(out[0].keys()), os.path.join(OUTPUT_DIR, "type_keyword_audit.csv"))
+
+
 def export(db: StateDB) -> None:
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     rows, removed = build_rows(db)
@@ -1278,11 +1354,32 @@ def export(db: StateDB) -> None:
     _write_csv(summaries, list(summaries[0].keys()) if summaries else [], os.path.join(OUTPUT_DIR, "run_summary.csv"))
     _write_csv(removed, REMOVED_COLUMNS, os.path.join(OUTPUT_DIR, "near_duplicates_removed.csv"))
     
-    rej = [{"payer_name": r["payer"], "document_url": r["document_url"], **json.loads(r["decision"] or "{}")}
-           for r in db.con.execute("SELECT payer, document_url, decision FROM documents WHERE accepted=0")]
+    rej = []
+    for r in db.con.execute("SELECT payer, document_url, row_json, decision FROM documents WHERE accepted=0"):
+        row = json.loads(r["row_json"] or "{}")
+        dec = json.loads(r["decision"] or "{}")
+
+        llm_data = dec.get("llm") or {}
+        if not isinstance(llm_data, dict):
+            llm_data = {}
+
+        rej.append({
+            "payer_name": r["payer"],
+            "document_url": r["document_url"],
+            "document_title": row.get("document_title", ""),
+            "file_type": row.get("file_type", ""),
+            "link_score": dec.get("link_score", ""),
+            "content_score": dec.get("content_score", ""),
+            "rejection_reason": dec.get("reason", "Unknown"),
+            "llm_reason": llm_data.get("reason", ""),
+            "content_signals": ", ".join(dec.get("content_signals", [])),
+            "link_signals": ", ".join(dec.get("link_signals", []))
+        })
     if rej:
         _write_csv(rej, list(rej[0].keys()), os.path.join(OUTPUT_DIR, "rejected_candidates.csv"))
         
+    _write_type_keyword_audit(db)
+
     blocked = [dict(r) for r in db.con.execute("SELECT * FROM blocked_pages")]
     if blocked:
         _write_csv(blocked, list(blocked[0].keys()), os.path.join(OUTPUT_DIR, "blocked_pages.csv"))

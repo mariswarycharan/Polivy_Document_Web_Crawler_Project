@@ -219,10 +219,10 @@ NEGATIVE_TERMS: list[tuple[str, float]] = [
     (r"privacy|hipaa notice|notice of privacy practices", -10), (r"terms (?:of use|and conditions|of service)", -10),
     (r"cookies?", -10), (r"non-?discrimination|language assistance|taglines?|accessibility", -6),
     (r"careers?|\bjobs?\b|job openings", -10), (r"investors?|shareholders?|annual report|sec filings|\besg\b|sustainability", -10),
-    (r"press releases?|newsroom|media (?:center|room)|news releases?", -6), (r"\bnews\b", -2), (r"\bblogs?\b|\barticles?\b", -4),
+    (r"press releases?|newsroom|media (?:center|room)|news releases?", -6), (r"(?<!provider )(?<!network )(?<!policy )\bnews\b", -2), (r"\bblogs?\b|\barticles?\b", -4),
     (r"\bevents?\b|webinars?", -3), (r"log ?in|sign ?in|sign ?up|register|my account|forgot password|reset password", -6),
     (r"member handbook|evidence of coverage|summary of benefits|\bsbc\b|annual notice of change|benefit summary|plan overview", -5),
-    (r"brochures?|flyers?|postcards?|infographics?", -5), (r"newsletters?", -3), (r"foundation|donat(?:e|ion)", -6),
+    (r"brochures?|flyers?|postcards?|infographics?", -5), (r"(?<!provider )(?<!network )(?<!policy )newsletters?", -3), (r"foundation|donat(?:e|ion)", -6),
     (r"find a (?:doctor|provider|pharmacy|dentist)|provider directory|find care|doctor finder", -5),
     (r"contact us|about us|leadership|board of directors|our story|mission", -5),
     (r"transparency in coverage|machine[\s-]readable|\bmrf\b|price transparency", -6),
@@ -289,6 +289,10 @@ def score_link(url: str, anchor: str = "", heading: str = "", parent: str = "", 
             total = min(total, 3.0) if total > 0 else total
         score += total * FIELD_WEIGHTS[name]
         signals += [f"{name}:{h}" for h in ph + nh]
+    kt, _kw = type_keyword_hit(f"{anchor} {fields['url']}".strip())
+    if kt and score > -3:          # (links that are clearly unwanted - privacy, careers ... - never get the bonus)
+        score += TYPE_KW_LINK_BONUS
+        signals.append(f"type_kw:{kt}")
     if url and url_ext(url) in DOC_EXTS and score > 0:
         score += 1.5
         signals.append(f"ext:{url_ext(url)}")
@@ -310,6 +314,77 @@ def link_kind(url: str) -> str:
     if any(h in low for h in MAYBE_DOC_HINTS):
         return "maybe_doc"
     return "page"
+
+
+# ---- type keywords: provider manuals, bulletins and prior-authorization documents --------------------------------
+# High-precision phrases looked for in the TITLE / LINK TEXT / URL words (and, weaker, in the listing page heading).
+# These document types usually have no policy number, effective date or CPT codes, so the content score alone cannot
+# recognise them - the keywords are what makes them visible at every gate (link score, accept/reject, type, HTML test).
+TYPE_KW_LINK_BONUS = 2.0
+_PAWORD = r"(?:prior[\s-]?auth\w*|pre-?auth\w*|precert\w*|pre-?certification|pre-?determination|pre-?service)"
+_TYPE_KW_SRC: dict[str, list[str]] = {
+    # most specific first: a "provider bulletin about prior authorization changes" is a bulletin, not a PA list
+    "bulletin": [
+        r"(?<!policy )\bbulletins?\b",
+        r"(?:medical |clinical |coverage |reimbursement |payment |drug |pharmacy |commercial |medicare advantage )?"
+        r"polic(?:y|ies)\s+(?:updates?|changes?|notifications?|announcements?|alerts?)",
+        r"provider\s+(?:news(?:letters?)?|updates?|alerts?|notices?|communications?|announcements?|advisor(?:y|ies))",
+        r"network\s+(?:news(?:letters?)?|updates?|bulletins?)",
+        r"notice\s+of\s+(?:policy\s+|coverage\s+)?changes?|advance\s+notice\s+of",
+        rf"{_PAWORD}\s+(?:requirements?\s+)?(?:changes?|updates?)",
+        r"(?:monthly|quarterly)\s+(?:policy\s+|provider\s+)?(?:updates?|news)",
+    ],
+    "provider_manual": [
+        r"provider\s+(?:operations?\s+|policy\s+|reference\s+|resource\s+|orientation\s+|office\s+|billing\s+|"
+        r"participation\s+|administrative\s+|services?\s+)?(?:manual|handbook|guide|playbook)s?",
+        r"administrative\s+(?:guide|manual)s?",
+        r"(?:office|operations?|billing|participating\s+provider|physician|practitioner|hospital|facility|network)\s+"
+        r"(?:reference\s+)?(?:manual|handbook)s?",
+        r"manual\s+for\s+providers|provider\s+and\s+(?:facility|office)\s+(?:manual|guide)",
+    ],
+    "pa_form": [
+        rf"{_PAWORD}\s+(?:request\s+|submission\s+)?(?:forms?|fax)\b",
+        r"(?:authorization|referral|notification|exception|coverage\s+determination|redetermination|medication|drug|pharmacy|"
+        r"step\s+therapy|formulary|specialty|outpatient|inpatient)\s+(?:request\s+)?forms?\b",
+        rf"request\s+(?:for|to)\s+(?:a\s+)?(?:{_PAWORD}|authorization|coverage\s+determination|exception|formulary\s+exception)",
+        r"\bpa\s+(?:request|forms?)\b|exceptions?\s+requests?|(?:medication|drug)\s+request",
+    ],
+    "pa_list": [
+        rf"{_PAWORD}\s+(?:and\s+notification\s+)?(?:code\s+)?(?:lists?|requirements?|matrix|grid|guide|quick\s+reference|look-?up|"
+        r"criteria\s+list|program)",
+        rf"{_PAWORD}\s+by\s+(?:plan|state|code|service)",
+        r"(?:advance\s+)?notification\s+(?:lists?|requirements?)",
+        rf"(?:services|procedures|drugs|medications|codes|items|equipment)\s+(?:that\s+)?(?:requiring|require|needing|subject\s+to)\s+"
+        rf"(?:{_PAWORD}|authorization|notification)",
+        r"\bpa\s+(?:code\s+)?(?:list|lookup|grid|requirements?|codes?)\b|authorization\s+(?:requirements?|lists?|matrix|grid)",
+    ],
+}
+TYPE_KW_ORDER = ("bulletin", "provider_manual", "pa_form", "pa_list")
+_TYPE_KW_RX = {k: [re.compile(p, re.I) for p in v] for k, v in _TYPE_KW_SRC.items()}
+
+
+@lru_cache(maxsize=100000)
+def type_keyword_hit(text: str) -> tuple[str, str]:
+    """-> (document_type, matched phrase) for the first type keyword found in `text`, or ("", "")."""
+    text = (text or "")[:900]
+    if not text:
+        return "", ""
+    for typ in TYPE_KW_ORDER:
+        for rx in _TYPE_KW_RX[typ]:
+            m = rx.search(text)
+            if m:
+                return typ, m.group(0).strip()[:60]
+    return "", ""
+
+
+def doc_type_hint(own: str, around: str = "") -> tuple[str, str, str]:
+    """-> (type, phrase, tier). tier 'title' = found in title / link text / URL words; 'listing' = only in the heading of
+    the page that listed the link (weaker: a list page named 'Provider Bulletins' with date-only link text)."""
+    kt, kw = type_keyword_hit(own)
+    if kt:
+        return kt, kw, "title"
+    kt, kw = type_keyword_hit(around)
+    return (kt, kw, "listing") if kt else ("", "", "")
 
 
 # ---- document type: weighted vote (title/link > header (position-weighted) > listing page > body) -------------
@@ -361,7 +436,7 @@ FORM_FIELDS = re.compile(r"member (?:id|name|number)|subscriber id|\bnpi\b|presc
 
 
 def classify_doc_type(own: str, header: str = "", body: str = "", around: str = "",
-                      policy_number: str = "") -> tuple[str, str, bool]:
+                      policy_number: str = "", boost: str = "") -> tuple[str, str, bool]:
     """Weighted vote over evidence tiers. Returns (document_type, evidence_tier, is_reimbursement_policy).
 
     own    = title + link text + URL words (weight 3)
@@ -387,6 +462,9 @@ def classify_doc_type(own: str, header: str = "", body: str = "", around: str = 
                 mult = 1.5 if (name == "document header" and pos < 150) else 1.0
                 scores[t] += best * weight * mult
                 src.setdefault(t, name)
+    if boost in DOC_TYPE_ORDER:      # the type keyword that got the document accepted (see doc_type_hint)
+        scores[boost] += 10
+        src.setdefault(boost, "type keywords")
     head_body = (header + " " + body)[:2500]
     if head_body.strip():
         cues = {m.group(0).lower() for m in FORM_FIELDS.finditer(head_body)}
@@ -548,14 +626,41 @@ _STRONG_DOC_MARKERS = re.compile(r"policy (?:number|no\.?|#)|effective date|medi
                                  r"(?:services|procedures|drugs) requiring", re.I)
 
 
-def html_policy_evidence(ins: "Inspection") -> tuple[bool, float, list[str]]:
-    """An HTML page is a policy document only on its own (non-link) text: not an index/hub, a content score >= 5 and at
-    least two distinct document markers (policy number, effective date, medical necessity, CPT/HCPCS, tiers ...)."""
+_INDEX_TITLE_RX = re.compile(r"\b(?:bulletins|manuals|newsletters|forms|lists|updates|guides|resources|archives?|library)\s*$", re.I)
+_MONTH_NAMES = r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+_DATED_RX = re.compile(rf"{_MONTH_NAMES}\.?\s+(?:\d{{1,2}},?\s+)?\d{{4}}|\b\d{{1,2}}/\d{{1,2}}/\d{{2,4}}\b|\b20\d{{2}}-\d{{2}}-\d{{2}}\b", re.I)
+
+
+def html_policy_evidence(ins: "Inspection", url: str = "") -> tuple[bool, float, list[str]]:
+    """An HTML page is a document only on its own (non-link) text - never an index / hub. Two ways in:
+    1) policy evidence: content score >= 5 and at least two distinct document markers (policy number, effective date,
+       medical necessity, CPT/HCPCS, tiers ...);
+    2) type keywords (provider manual / bulletin / prior-authorization page): the title or URL carries a type keyword, the page
+       is long enough for its type, is not link-dense, is not a plural 'index' title ('Provider Bulletins') and, for bulletins,
+       is dated."""
     text = ins.nonlink_text or ""
     cs, sig = content_fingerprint(text)
     is_index = ins.link_density > 0.35 or ins.doc_links >= 8 or len(text) < 600
     strong = len({m.group(0).lower() for m in _STRONG_DOC_MARKERS.finditer(text[:8000])})
-    return (not is_index and cs >= 5 and strong >= 2), cs, sig
+    if not is_index and cs >= 5 and strong >= 2:
+        return True, cs, sig
+    kt, _kw = type_keyword_hit(" ".join(list(ins.titles) + [url_words(url) if url else ""]))
+    if kt and header_negative(text) > -4:
+        first_title = ins.titles[0] if ins.titles else ""
+        plural_index = bool(_INDEX_TITLE_RX.search(first_title) and not re.search(r"\b(?:19|20)\d{2}\b", first_title))
+        min_len = {"provider_manual": 1500, "bulletin": 400}.get(kt, 500)
+        dated = bool(_DATED_RX.search(text[:3000]) or _DATED_RX.search(first_title))
+        if (ins.link_density <= 0.35 and ins.doc_links < 8 and len(text) >= min_len and not plural_index
+                and (kt != "bulletin" or dated)):
+            return True, cs, sig + [f"type_kw:{kt}"]
+    return False, cs, sig
+
+
+def header_negative(text: str, n: int = 250) -> float:
+    """Negative content score of the document's OPENING only (first n characters, default 250). A privacy notice / handbook / EOC says so
+    at the top; a provider manual merely cross-references those documents deeper in its table of contents."""
+    neg, _ = _match_terms((text or "")[:n], _CNEG)
+    return neg
 
 
 def content_fingerprint(text: str) -> tuple[float, list[str]]:
