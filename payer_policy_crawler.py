@@ -1676,8 +1676,47 @@ def summarize(db: StateDB, payer: str, rows: list[dict], removed: list[dict]) ->
         types[r["document_type"]] += 1
     skipped_links = db.con.execute("SELECT COUNT(*) FROM skipped_links WHERE payer=?", (payer,)).fetchone()[0]
     ok = found - len(dups) == len(prow)
+
+    # 1. Final unique accepted documents in the output
+    accepted_unique = len(prow)
+    
+    # 2. Duplicates removed during the export/deduplication phase
+    duplicates_removed_count = len(dups)
+    
+    # 3. Counts from the frontier (links that were actually fetched/attempted)
+    rejected_count = g(D, ("rejected",))
+    failed_count = g(D, ("failed",))
+    blocked_count = g(D, ("blocked",))
+    skipped_robots_count = g(D, ("skipped_robots",))
+    skipped_budget_count = g(D, ("skipped_budget",))
+    
+    # 4. Links skipped BEFORE fetching (low score, excluded doc types, etc.)
+    # Note: This table contains both doc and page links that were filtered out early.
+    skipped_low_score_or_excluded = db.con.execute(
+        "SELECT COUNT(*) FROM skipped_links WHERE payer=?", (payer,)
+    ).fetchone()[0]
+    
+    # Total Skipped = Robots + Budget + Low Score/Excluded
+    total_skipped = skipped_robots_count + skipped_budget_count + skipped_low_score_or_excluded
+    
+    # GRAND TOTAL: Every single link the crawler discovered and evaluated
+    total_links_visited = (accepted_unique + duplicates_removed_count + rejected_count + 
+                           failed_count + blocked_count + total_skipped)
+    # ==============================================================================
+
     return {
         "payer_name": payer,
+        
+         # --- NEW: Total Links Visited & Breakdown ---
+        "total_links_visited": total_links_visited,
+        "accepted_unique": accepted_unique,
+        "rejected": rejected_count,
+        "skipped_total": total_skipped,
+        "failed": failed_count,
+        "blocked": blocked_count,
+        "duplicates_removed": duplicates_removed_count,
+        "reconciliation_check": "OK" if total_links_visited == (accepted_unique + duplicates_removed_count + rejected_count + failed_count + blocked_count + total_skipped) else "MISMATCH",
+        
         "attempted": g(D, ("accepted", "rejected", "blocked", "failed")),
         "found": found,
         "failed": g(D, ("failed",)),
