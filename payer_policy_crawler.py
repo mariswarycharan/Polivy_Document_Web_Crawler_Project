@@ -26,7 +26,7 @@ try:
 except ImportError:  # pragma: no cover
     etree = None
 
-from crawler_config import (RELATED_TRIAL_BRAND_PAGES, RELATED_TRIAL_MAX_PAGES, RELATED_TRIAL_MIN_DOCS, CDN_TRUST_MIN_DOCS, HUB_FAMILY_MIN_LINKS, PAGE_SKIP_RECORD_MIN_SCORE, EXCLUDED_DOC_TYPES, PARALLEL_PAYERS, STOP, PREFETCH_AHEAD, BROWSER_RETRY_ON_BOT_CHALLENGE, COLUMNS, DOC_CANDIDATE_MIN_SCORE, DOC_DONE_STATES, ENUMS, EXTERNAL_DOC_MIN_SCORE, EXTRA_START_URLS, HOMEPAGE_URL, HUB_INHERIT_MAX_BONUS, HUB_INHERIT_MIN_SCORE, KNOWN_PATTERN_MIN_DOCS, LLM_FOR_MISSING_FIELDS, MAX_DEPTH, MAX_DOCUMENTS_PER_PAYER, MAX_PAGES_PER_PAYER, MAX_PARSE_BYTES, MAX_RENDERS_PER_PAYER, MAX_SITEMAP_FILES, MAX_SITEMAP_URLS, MAYBE_DOC_MIN_SCORE, NAV_FOLLOW_MIN_SCORE, NOTES_MAX_CHARS, OLLAMA_MODEL, OUTPUT_DIR, PAGE_DONE_STATES, PAGE_FOLLOW_MIN_SCORE, PAYER_NAME, PAYER_REGISTRY, ProgressUI, RELATED_DOMAIN_DEPTH_BUDGET, RELATED_DOMAIN_MIN_SCORE, RESET_PAYER_STATE, REVISION_POLICY, RUN_ALL_PAYERS, SAVE_DOCUMENT_FILES, SEED_LIST_CSV, STATE_DB, STATE_JOINER, STATE_NATIONAL, UNFETCHED_DOC_ROW_MIN_SCORE, log, setup_logging, utc_now_iso)
+from crawler_config import (HOST_MAX_REFUSALS, RELATED_TRIAL_MAX_REFUSALS, RELATED_TRIAL_BRAND_PAGES, RELATED_TRIAL_MAX_PAGES, RELATED_TRIAL_MIN_DOCS, CDN_TRUST_MIN_DOCS, HUB_FAMILY_MIN_LINKS, PAGE_SKIP_RECORD_MIN_SCORE, EXCLUDED_DOC_TYPES, PARALLEL_PAYERS, STOP, PREFETCH_AHEAD, BROWSER_RETRY_ON_BOT_CHALLENGE, COLUMNS, DOC_CANDIDATE_MIN_SCORE, DOC_DONE_STATES, ENUMS, EXTERNAL_DOC_MIN_SCORE, EXTRA_START_URLS, HOMEPAGE_URL, HUB_INHERIT_MAX_BONUS, HUB_INHERIT_MIN_SCORE, KNOWN_PATTERN_MIN_DOCS, LLM_FOR_MISSING_FIELDS, MAX_DEPTH, MAX_DOCUMENTS_PER_PAYER, MAX_PAGES_PER_PAYER, MAX_PARSE_BYTES, MAX_RENDERS_PER_PAYER, MAX_SITEMAP_FILES, MAX_SITEMAP_URLS, MAYBE_DOC_MIN_SCORE, NAV_FOLLOW_MIN_SCORE, NOTES_MAX_CHARS, OLLAMA_MODEL, OUTPUT_DIR, PAGE_DONE_STATES, PAGE_FOLLOW_MIN_SCORE, PAYER_NAME, PAYER_REGISTRY, ProgressUI, RELATED_DOMAIN_DEPTH_BUDGET, RELATED_DOMAIN_MIN_SCORE, RESET_PAYER_STATE, REVISION_POLICY, RUN_ALL_PAYERS, SAVE_DOCUMENT_FILES, SEED_LIST_CSV, STATE_DB, STATE_JOINER, STATE_NATIONAL, UNFETCHED_DOC_ROW_MIN_SCORE, log, setup_logging, utc_now_iso)
 from crawler_io import (Browser, FetchResult, Fetcher, Inspection, Link, RenderResult, VIA_BY_ORIGIN, extract_links, inspect_content, inspect_html, is_auth_block, links_from_json, needs_js, sniff_file_type)
 from crawler_state import (LLMClassifier, PolicyRow, StateDB, load_schema_dictionary)
 from crawler_text import (declared_count, cdn_tenant, DOC_EXTS, excluded_doc_type, THIRD_PARTY_BLOCKLIST, classify_doc_type, clean_anchor, clean_text, content_fingerprint, detect_lob, detect_state, extract_dates, extract_policy_number, html_policy_evidence, is_cdn_host, is_good_title, join_notes, link_kind, normalize_url, parse_date, reg_domain, register_brands, score_link, sha256_hex, short_url, text_fingerprint, title_from_filename, trim_title, url_ext, url_key, url_words)
@@ -138,6 +138,8 @@ class PayerCrawler:
         self.hub_declared: dict[str, dict] = self.db.get(self.name, "hub_declared", {})        # hub base -> declared entry count
         self.related_rejected: set[str] = set(self.db.get(self.name, "related_rejected", []))
         self.cdn_proven: dict[str, int] = {k: int(v) for k, v in self.db.get(self.name, "cdn_proven", {}).items()}
+        self.refused_hosts: set[str] = set(self.db.get(self.name, "refused_hosts", []))   # hosts that keep refusing access
+        self.host_refusals: dict[str, int] = {}                                             # consecutive refusals per host
         self.renders_at_start = self.br.renders
         c = self.db.status_counts(self.name)
         self.pages_done = sum(c.get(("page", s), 0) for s in PAGE_DONE_STATES)
@@ -161,6 +163,9 @@ class PayerCrawler:
         if not self.db.phase_done(self.name, "resolve"):
             self._phase("resolve host")
             self.phase_resolve()
+        if not self.db.phase_done(self.name, "affiliated"):
+            self._phase("affiliated sites")
+            self.phase_affiliated()
         if not self.db.phase_done(self.name, "sitemaps"):
             self._phase("sitemaps")
             self.phase_sitemaps()
@@ -227,6 +232,86 @@ class PayerCrawler:
         self.db.commit()
         self._save_domains()
         self.db.mark_phase(self.name, "resolve")
+
+    def phase_affiliated(self) -> None:
+        """Every affiliated domain of the payer, and its common sub-domains, becomes a starting point (not only the
+        hint host). A site that is blocked, down, missing or disallowed by robots.txt is logged and skipped; the
+        others are crawled. Works for any payer in the registry: it only reads `affiliated_domains`."""
+        hint = self.p.get("hint_host") or ""
+        known = {urlparse(h).hostname for h in self.home_hosts}
+        cands: list[tuple[str, str]] = []
+        for dom in sorted(self.affiliated):
+            for sub in [""] + COMMON_SUBDOMAINS:
+                host = f"{sub}.{dom}" if sub else dom
+                if host not in known:
+                    cands.append((host, f"https://{host}/"))
+        results = self.fx.fetch_many([u for _, u in cands]) if cands else []
+        new_hosts: list[str] = []
+        skipped = 0
+        for (host, u), r in zip(cands, results):
+            final = r.final_url or u
+            fhost = urlparse(final).hostname or ""
+            if r.error or r.blocked or not r.status or r.status >= 400:
+                skipped += 1
+                if r.blocked or r.error == "robots_disallowed" or (r.status and r.status != 404):
+                    log(logging.WARNING, "affiliated_site_skipped", payer=self.name, url=u, status=r.status,
+                        reason=r.blocked or r.error or f"http_{r.status}")
+                    if r.blocked:
+                        self.db.block_page(self.name, u, r.blocked, r.status)
+                continue
+            if reg_domain(fhost) not in self.home_domains or fhost in known:
+                continue
+            known.add(fhost)
+            origin = f"{urlparse(final).scheme}://{urlparse(final).netloc}"
+            new_hosts.append(origin)
+            self.db.enqueue(self.name, dict(url=final, kind="page", priority=100, depth=0, budget=MAX_DEPTH,
+                                            source_page_url=final,
+                                            discovery_path=f"seed:{hint} > affiliated({host}) > page({final})",
+                                            link_score=10, route="seed", hints={"_via": "css_selector"}))
+            log(logging.INFO, "affiliated_site_found", payer=self.name, url=final)
+        self.home_hosts = list(dict.fromkeys(self.home_hosts + new_hosts))
+        self.db.commit()
+        self._save_domains()
+        log(logging.INFO, "affiliated_done", payer=self.name, probed=len(cands), sites_added=len(new_hosts), skipped=skipped)
+        if new_hosts and self.db.phase_done(self.name, "sitemaps"):     # resumed run: read the new sites' sitemaps too
+            all_hosts, self.home_hosts = self.home_hosts, new_hosts
+            try:
+                self.phase_sitemaps()
+            finally:
+                self.home_hosts = all_hosts
+        self.db.mark_phase(self.name, "affiliated")
+
+    # ---------------------------------------------------------------- hosts that refuse access
+    def _host_is_refused(self, item: dict) -> bool:
+        """True (and the item is closed as blocked, without a request) when its host already refused us repeatedly."""
+        host = (urlparse(item["url"]).hostname or "").lower()
+        if host and host in self.refused_hosts:
+            self.db.finish(self.name, item["key"], "blocked", "host_refused_access")
+            return True
+        return False
+
+    def _host_result(self, url: str, r: FetchResult) -> None:
+        """Count refusals per host (403, bot wall, 429; not login walls or 404s). After HOST_MAX_REFUSALS refusals in a
+        row the host is set aside: its pending items are closed as blocked and the crawl moves on to other sites."""
+        host = (urlparse(url).hostname or "").lower()
+        if not host:
+            return
+        if r.blocked and not is_auth_block(r.blocked):
+            n = self.host_refusals.get(host, 0) + 1
+            self.host_refusals[host] = n
+            if n >= HOST_MAX_REFUSALS and host not in self.refused_hosts:
+                self.refused_hosts.add(host)
+                self.db.put(self.name, "refused_hosts", sorted(self.refused_hosts))
+                closed = 0
+                for row in self.db.con.execute("SELECT key, url FROM frontier WHERE payer=? AND status='pending'",
+                                               (self.name,)).fetchall():
+                    if (urlparse(row["url"]).hostname or "").lower() == host:
+                        self.db.finish(self.name, row["key"], "blocked", "host_refused_access")
+                        closed += 1
+                log(logging.WARNING, "host_refused_moving_on", payer=self.name, host=host, refusals=n,
+                    reason=r.blocked, pending_closed=closed)
+        elif r.status and r.status < 400 and not r.error:
+            self.host_refusals[host] = 0
 
     def phase_sitemaps(self) -> None:
         hint = self.p.get("hint_host") or ""
@@ -409,7 +494,10 @@ class PayerCrawler:
         if reg_domain(urlparse(url).hostname or "") in self.related_rejected:
             self.db.finish(self.name, key, "skipped_budget", "related_domain_trial_failed")
             return
+        if self._host_is_refused(item):
+            return
         r = self.fx.fetch_prefetched(url)
+        self._host_result(url, r)
         if r.error == "robots_disallowed":
             log(logging.INFO, "robots_disallowed", payer=self.name, url=url)
             self.db.finish(self.name, key, "skipped_robots", "robots.txt disallow")
@@ -427,9 +515,11 @@ class PayerCrawler:
             log(logging.WARNING, "page_blocked", payer=self.name, url=url, reason=r.blocked, status=r.status)
             self.db.block_page(self.name, url, r.blocked, r.status)
             self.db.finish(self.name, key, "blocked", r.blocked)
+            self._trial_refused(url, r.blocked)
             return
         if r.status >= 400:
             self.db.finish(self.name, key, "failed", f"http_{r.status}")
+            self._trial_refused(url, f"http_{r.status}")
             return
         ft = sniff_file_type(r.content, r.content_type, r.final_url or url)
         if ft != "html":   # an extension-less link turned out to be a document
@@ -652,6 +742,8 @@ class PayerCrawler:
         if self.db.doc_accepted(self.name, key):
             self.db.finish(self.name, key, "rejected", "duplicate_url")
             return
+        if prefetched is None and self._host_is_refused(item):
+            return
         r = prefetched or self.fx.fetch_prefetched(url)
         if r.error == "robots_disallowed":
             log(logging.INFO, "robots_disallowed", payer=self.name, url=url)
@@ -661,6 +753,8 @@ class PayerCrawler:
             br = self.br.fetch_bytes(url)
             if not br.error and not br.blocked and 0 < br.status < 400:
                 r = br
+        if prefetched is None:
+            self._host_result(url, r)
         if r.error or r.blocked or r.status >= 400 or r.status == 0:
             self._finalize_unfetched(item, r)
             return
@@ -806,6 +900,20 @@ class PayerCrawler:
             self.db.put(self.name, "hub_declared", self.hub_declared)
 
     # ---------------------------------------------------------------- related-domain trial
+    def _trial_refused(self, url: str, reason: str) -> None:
+        """A related domain on trial that refuses us (403, bot wall, 4xx) is dropped after
+        RELATED_TRIAL_MAX_REFUSALS refusals, so its other queued pages are not requested one by one."""
+        dom = reg_domain(urlparse(url).hostname or "")
+        t = self.related_trial.get(dom)
+        if t is None:
+            return
+        t["pages"] += 1
+        t["refused"] = t.get("refused", 0) + 1
+        if t["refused"] >= RELATED_TRIAL_MAX_REFUSALS and t["docs"] == 0:
+            t["pages"] = max(t["pages"], RELATED_TRIAL_MAX_PAGES)     # forces the drop in _trial_check
+            log(logging.INFO, "related_domain_refuses_access", payer=self.name, domain=dom, reason=reason, **t)
+        self._trial_check(dom)
+
     def _trial_page(self, dom: str, html: str) -> None:
         t = self.related_trial[dom]
         t["pages"] += 1
@@ -1748,8 +1856,7 @@ def summarize(db: StateDB, payer: str, rows: list[dict], removed: list[dict]) ->
 def _write_table(rows: list[dict], removed: list[dict], summaries: list[dict], stem: str) -> None:
     from openpyxl import Workbook
     from openpyxl.utils import get_column_letter
-    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
-
+    
     # 1. Write CSV using built-in csv module
     csv_path = os.path.join(OUTPUT_DIR, f"{stem}.csv")
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
@@ -1783,9 +1890,7 @@ def _write_table(rows: list[dict], removed: list[dict], summaries: list[dict], s
             if c in ("http_status", "file_size_bytes"):
                 row_out.append(int(val) if val != "" else "")
             else:
-                val_str = str(val) if val is not None else ""
-                val_str = ILLEGAL_CHARACTERS_RE.sub("", val_str)  # <--- ADD THIS LINE TO SANITIZE
-                cell = WriteOnlyCell(ws_docs, value=val_str)
+                cell = WriteOnlyCell(ws_docs, value=str(val) if val is not None else "")
                 cell.number_format = "@"      # text columns stay text (policy numbers keep leading zeros)
                 row_out.append(cell)
         ws_docs.append(row_out)
@@ -1796,15 +1901,15 @@ def _write_table(rows: list[dict], removed: list[dict], summaries: list[dict], s
         sum_cols = list(summaries[0].keys())
         ws_sum.append(sum_cols)
         for s in summaries:
-            ws_sum.append([ILLEGAL_CHARACTERS_RE.sub("", str(s.get(c, ""))) for c in sum_cols])  # <--- UPDATED
+            ws_sum.append([str(s.get(c, "")) for c in sum_cols])
 
     # Sheet 3: near_duplicates_removed
     if removed:
         ws_rem = wb.create_sheet("near_duplicates_removed")
         ws_rem.append(REMOVED_COLUMNS)
         for r in removed:
-            ws_rem.append([ILLEGAL_CHARACTERS_RE.sub("", str(r.get(c, ""))) for c in REMOVED_COLUMNS])  # <--- UPDATED
-            
+            ws_rem.append([str(r.get(c, "")) for c in REMOVED_COLUMNS])
+
     wb.save(xlsx_path)
     log(logging.INFO, "exported", file=xlsx_path, rows=len(rows))
 

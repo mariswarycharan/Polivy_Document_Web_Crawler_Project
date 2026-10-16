@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 # =============================================================================
 # 1. INPUT  (edit here - no command-line arguments)
 # =============================================================================
-HOMEPAGE_URL = "https://www.cigna.com"  # the payer homepage / hint host to crawl
+HOMEPAGE_URL = "https://www.centene.com"  # the payer homepage / hint host to crawl
 PAYER_NAME = ""            # "" -> looked up in PAYER_REGISTRY / payer_seed_list.csv by host
 RUN_ALL_PAYERS = False     # True -> ignore HOMEPAGE_URL and crawl every payer in the registry
 EXTRA_START_URLS: list[str] = []   # optional extra entry points for the payer in HOMEPAGE_URL
@@ -124,6 +124,8 @@ RELATED_DOMAIN_MIN_SCORE = 7    # off-domain page must score this to open a rela
 RELATED_TRIAL_MIN_DOCS = 2
 RELATED_TRIAL_BRAND_PAGES = 3
 RELATED_TRIAL_MAX_PAGES = 12
+RELATED_TRIAL_MAX_REFUSALS = 5   # a trial domain that refuses this many pages (403, bot wall, 4xx) with no documents is dropped, so the crawl moves on
+HOST_MAX_REFUSALS = 5            # any host (sub-domain level) that refuses this many requests in a row is set aside; the crawl moves on
 HUB_INHERIT_MIN_SCORE = 5.0       # documents on a policy hub page inherit part of the hub's score
 HUB_INHERIT_MAX_BONUS = 2.0
 HUB_FAMILY_MIN_LINKS = 6          # >= this many same-folder page links on a policy hub = a listing: every member is followed

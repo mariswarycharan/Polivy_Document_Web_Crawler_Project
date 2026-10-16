@@ -201,6 +201,10 @@ THIRD_PARTY_BLOCKLIST = {
     "vimeo.com", "flickr.com", "wikipedia.org", "glassdoor.com", "indeed.com", "medium.com",
     "cms.gov", "medicare.gov", "healthcare.gov", "hhs.gov", "fda.gov", "cdc.gov", "nih.gov",
     "addtoany.com", "sharethis.com", "onetrust.com", "cookielaw.org", "qualtrics.com", "zoom.us",
+    # industry associations and health-news sites: they write ABOUT payer policies but do not publish them
+    "bcbs.com", "kff.org", "healthaffairs.org", "fiercehealthcare.com", "modernhealthcare.com",
+    "beckershospitalreview.com", "beckerspayer.com", "statnews.com", "ama-assn.org", "aha.org", "prnewswire.com",
+    "businesswire.com", "globenewswire.com",
 }
 
 POSITIVE_TERMS: list[tuple[str, float]] = [
