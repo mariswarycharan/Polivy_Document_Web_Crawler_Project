@@ -1856,7 +1856,8 @@ def summarize(db: StateDB, payer: str, rows: list[dict], removed: list[dict]) ->
 def _write_table(rows: list[dict], removed: list[dict], summaries: list[dict], stem: str) -> None:
     from openpyxl import Workbook
     from openpyxl.utils import get_column_letter
-    
+    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+
     # 1. Write CSV using built-in csv module
     csv_path = os.path.join(OUTPUT_DIR, f"{stem}.csv")
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
@@ -1890,7 +1891,9 @@ def _write_table(rows: list[dict], removed: list[dict], summaries: list[dict], s
             if c in ("http_status", "file_size_bytes"):
                 row_out.append(int(val) if val != "" else "")
             else:
-                cell = WriteOnlyCell(ws_docs, value=str(val) if val is not None else "")
+                val_str = str(val) if val is not None else ""
+                val_str = ILLEGAL_CHARACTERS_RE.sub("", val_str)  # <--- ADD THIS LINE TO SANITIZE
+                cell = WriteOnlyCell(ws_docs, value=val_str)
                 cell.number_format = "@"      # text columns stay text (policy numbers keep leading zeros)
                 row_out.append(cell)
         ws_docs.append(row_out)
@@ -1901,15 +1904,15 @@ def _write_table(rows: list[dict], removed: list[dict], summaries: list[dict], s
         sum_cols = list(summaries[0].keys())
         ws_sum.append(sum_cols)
         for s in summaries:
-            ws_sum.append([str(s.get(c, "")) for c in sum_cols])
+            ws_sum.append([ILLEGAL_CHARACTERS_RE.sub("", str(s.get(c, ""))) for c in sum_cols])  # <--- UPDATED
 
     # Sheet 3: near_duplicates_removed
     if removed:
         ws_rem = wb.create_sheet("near_duplicates_removed")
         ws_rem.append(REMOVED_COLUMNS)
         for r in removed:
-            ws_rem.append([str(r.get(c, "")) for c in REMOVED_COLUMNS])
-
+            ws_rem.append([ILLEGAL_CHARACTERS_RE.sub("", str(r.get(c, ""))) for c in REMOVED_COLUMNS])  # <--- UPDATED
+            
     wb.save(xlsx_path)
     log(logging.INFO, "exported", file=xlsx_path, rows=len(rows))
 
