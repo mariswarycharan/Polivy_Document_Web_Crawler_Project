@@ -104,7 +104,7 @@ RETRY_STATUSES = {429, 500, 502, 503, 504}
 MAX_PARSE_BYTES = 60 * 1024 * 1024      # bytes kept in memory for parsing (the hash always covers the full body)
 MAX_STREAM_BYTES = 1024 * 1024 * 1024   # abort pathological downloads above this size
 
-MAX_PAGES_PER_PAYER = 2500        # HTML pages crawled
+MAX_PAGES_PER_PAYER = 20000        # HTML pages crawled
 MAX_DOCUMENTS_PER_PAYER = 50000   # document candidates fetched
 MAX_DEPTH = 5                     # link hops from the seed
 RELATED_DOMAIN_DEPTH_BUDGET = 3   # hops allowed inside a newly discovered (non-affiliated) related domain
