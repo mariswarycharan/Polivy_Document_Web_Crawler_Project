@@ -1,0 +1,25 @@
+# Python 3.10+ (developed and tested on 3.12)
+#
+# pip only installs the Python packages below. Three things are NOT pip packages and must be installed separately
+# (full steps in README.md):
+#   1. Chromium for Playwright   ->  python -m playwright install --with-deps chromium
+#   2. Tesseract OCR binary      ->  apt install tesseract-ocr | brew install tesseract | Windows installer (UB Mannheim)
+#   3. Ollama + the LLM model    ->  https://ollama.com/download   then:   ollama pull qwen2.5:3b
+
+# ---- core (the crawler cannot run without these) ----
+httpx>=0.27           # HTTP client
+selectolax>=0.3.21    # fast HTML parsing (Lexbor backend)
+protego>=0.3          # robots.txt parser
+tldextract>=5.1       # registrable-domain detection (bundled suffix list, no network)
+python-dateutil>=2.9  # date parsing
+pydantic>=2.6         # row validation against the 22-column schema
+openpyxl>=3.1         # reads schema_dictionary.xlsx, writes the .xlsx outputs
+PyMuPDF>=1.24         # PDF text / metadata extraction
+lxml>=5.1             # sitemap XML parsing
+playwright>=1.44      # headless Chromium for JavaScript-rendered pages
+
+# ---- used when present; the crawler degrades gracefully without them ----
+rich>=13.7            # live progress bar in the terminal (plain status lines otherwise)
+pytesseract>=0.3.10   # OCR for scanned PDFs (USE_OCR in crawler_config.py) - also needs the Tesseract binary, see above
+Pillow>=10.0          # image handling for OCR
+brotli>=1.1           # only used if a server ignores "Accept-Encoding: identity" and sends br-compressed bodies
