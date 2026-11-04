@@ -137,13 +137,22 @@ def inspect_pdf(data: bytes, payer_alias: str) -> Inspection:
                     cache[i] = ""
             return cache[i]
 
-        n_fp = min(doc.page_count, TEXT_FP_MAX_PAGES)
-        texts = [page_text(i) for i in range(n_fp)]
-        ins.text = "\n".join(texts[:3])
+        if doc.page_count <= TEXT_FP_MAX_PAGES:
+            fp_indices = list(range(doc.page_count))
+        else:
+            # Sample first 25 pages, 15 evenly spaced middle pages, and last 5 pages
+            first_part = list(range(25))
+            last_part = list(range(max(25, doc.page_count - 5), doc.page_count))
+            mid_start = 25
+            mid_end = max(25, doc.page_count - 5)
+            step = max(1, (mid_end - mid_start) // 15)
+            mid_part = [i for i in range(mid_start, mid_end, step)][:15]
+            fp_indices = sorted(set(first_part + mid_part + last_part))
+        texts = [page_text(i) for i in fp_indices]
+        ins.text = "\n".join(page_text(i) for i in range(min(3, doc.page_count)))
         ins.tail_text = "\n".join(page_text(i) for i in range(max(3, doc.page_count - 2), doc.page_count))
         ins.meta_modified = _meta_date(meta.get("modDate", "")) or _meta_date(meta.get("creationDate", ""))
-        tail = [page_text(i) for i in range(max(n_fp, doc.page_count - 2), doc.page_count)]
-        ins.fp_text = "\n".join(texts + tail) + f"\n[pages {doc.page_count}]"
+        ins.fp_text = "\n".join(texts) + f"\n[pages {doc.page_count}]"
         if doc.page_count:
             page = doc[0]
             spans = []
@@ -240,9 +249,39 @@ def _inside(node: Node, tags: tuple[str, ...], max_up: int = 12) -> bool:
     return False
 
 
+def _detect_meta_charset(raw: bytes) -> str:
+    """Check first 4KB of HTML bytes for <meta charset=...> or Content-Type."""
+    if not isinstance(raw, bytes):
+        return ""
+    head = raw[:4096]
+    m = re.search(rb"""<meta[^>]+charset=['"]?([\w\-]+)""", head, re.I)
+    if not m:
+        m = re.search(rb"""<meta[^>]+http-equiv=['"]?Content-Type['"]?[^>]+content=['"][^'"]*charset=([\w\-]+)""", head, re.I)
+    if not m:
+        m = re.search(rb"""<meta[^>]+content=['"][^'"]*charset=([\w\-]+)['"][^>]+http-equiv=['"]?Content-Type""", head, re.I)
+    if m:
+        try:
+            name = m.group(1).decode("ascii", "ignore").strip().strip("'\"").lower()
+            if name in ("utf8mb4", "utf-8-mb4", "utf8"):
+                return "utf-8"
+            import codecs
+            codecs.lookup(name)
+            return name
+        except Exception:
+            pass
+    return ""
+
+
 def inspect_html(data: bytes, url: str, payer_alias: str) -> Inspection:
     ins = Inspection(file_type="html")
-    html = data.decode("utf-8", "ignore") if isinstance(data, bytes) else data
+    if isinstance(data, bytes):
+        enc = _detect_meta_charset(data) or "utf-8"
+        try:
+            html = data.decode(enc, "ignore")
+        except Exception:
+            html = data.decode("utf-8", "ignore")
+    else:
+        html = data
     tree = HTMLParser(html)
     can = tree.css_first("link[rel=canonical]")
     if can is not None:
@@ -307,13 +346,23 @@ def inspect_content(data: bytes, content_type: str, url: str, payer_alias: str) 
         if is_good_title(t, payer_alias):
             ins.meta_title = t
     elif ft in ("doc", "xls"):
-        ins.notes.append(f"legacy .{ft} file - text not parsed")
+        # Extract readable ASCII and UTF-16LE text from legacy binary format
+        ascii_words = [s.decode("latin-1", "ignore") for s in re.findall(b"[\x20-\x7E\t\r\n]{4,}", data)]
+        utf16_words = [s.decode("utf-16le", "ignore") for s in re.findall(b"(?:[\x20-\x7E\t\r\n]\x00){4,}", data)]
+        extracted = " ".join(ascii_words + utf16_words)
+        cleaned_words = re.findall(r"\b[A-Za-z0-9\-\.\/]{2,}\b", extracted)
+        sample_text = clean_text(" ".join(cleaned_words[:4000]))
+        if sample_text:
+            ins.text = ins.fp_text = sample_text
+            ins.notes.append(f"legacy .{ft} file - extracted {len(sample_text)} characters of text")
+        else:
+            ins.notes.append(f"legacy .{ft} file - text not parsed")
     else:
         sample = data[:20000].decode("utf-8", "ignore")
         if sample and re.search(r"[A-Za-z]{4}", sample) and "\x00" not in sample:
             ins.text = ins.fp_text = sample
         ins.notes.append("file type not in schema list (csv/txt/rtf/unknown) - typed other")
-    ins.readable = len(clean_text(ins.text)) >= 80
+    ins.readable = len(clean_text(ins.text)) >= (40 if ft in ("doc", "xls") else 80)
     return ins
 
 
@@ -523,7 +572,7 @@ WAF_SIGNATURES_200 = [   # 200 responses: only unmistakable interstitials (norma
     ("radware", re.compile(rb"validate\.perfdrive\.com|radware bot manager", re.I)),
     ("generic_captcha", re.compile(rb"pardon our interruption|verify you are (?:a )?human|are you a robot", re.I)),
 ]
-LOGIN_URL_RX = re.compile(r"(?:^|[/._\-?=])(log-?in|sign-?in|signon|sso|auth(?:orize|enticate)?|oauth2?|saml|idp|account/login|"
+LOGIN_URL_RX = re.compile(r"(?:^|[/._\-?=])(log-?in|sign-?in|signon|sso|(?<!prior-)(?<!pre-)(?<!prior_)(?<!pre_)auth(?:orize|enticate)?|oauth2?|saml|idp|account/login|"
                           r"logon|b2c_1|myaccount|login\.aspx|identity)(?:[/._\-?=&]|$)", re.I)
 _PASSWORD_RX = re.compile(rb"<input[^>]+type=[\"']?password", re.I)
 _REG_WALL_RX = re.compile(rb"(?:log ?in|sign ?in|register) to (?:view|access|continue|download)|members? only|"
@@ -582,9 +631,7 @@ def classify_block(status: int, original_url: str, final_url: str, body: bytes) 
         if status == 200 and len(body) < 40000:
             for vendor, rx in WAF_SIGNATURES_200:
                 if rx.search(head):
-                    # Allow CDN bot challenges to pass through to browser retry or normal parsing
-                    if not is_cdn:
-                        return f"bot_challenge_{vendor}_{status}"
+                    return f"bot_challenge_{vendor}_{status}"
         if b"<" in head[:2000]:
             n_links = len(re.findall(rb"<a\s", head, re.I))
             vis = _visible_text_len(head)
@@ -938,8 +985,37 @@ class Browser:
             out.error = "browser_unavailable"
             return out
         page = self._ctx.new_page()
-        responses: list = []
-        page.on("response", lambda r: responses.append(r) if r.request.resource_type in ("xhr", "fetch") else None)
+        captured_xhr: list[tuple[str, str, str]] = []  # (url, ct, body)
+        pending_responses: list = []
+
+        def _drain_response(r) -> bool:
+            try:
+                ct = (r.headers or {}).get("content-type", "")
+                if r.status >= 400:
+                    return True
+                if "json" in ct.lower() or "html" in ct.lower() or "xml" in ct.lower():
+                    body = r.text()
+                    if len(body) <= 8_000_000:
+                        captured_xhr.append((r.url, ct, body))
+                return True
+            except Exception:
+                return False
+
+        def _on_resp(r):
+            if r.request.resource_type in ("xhr", "fetch"):
+                if not _drain_response(r):
+                    pending_responses.append(r)
+
+        page.on("response", _on_resp)
+
+        def _drain_all():
+            nonlocal pending_responses
+            still = []
+            for r in pending_responses:
+                if not _drain_response(r):
+                    still.append(r)
+            pending_responses = still
+
         seen: set = set()
         try:
             if self.before_request is not None:
@@ -1027,29 +1103,32 @@ class Browser:
                     except Exception:
                         continue
             self._expand(page, out, seen)
-            self._click_tabs(page, out, seen)
+            _drain_all()
+            # Initial state pagination (before tab clicks)
             self._paginate(page, out, seen)
+            _drain_all()
+            # Tabs exploration (each tab is also paginated)
+            self._click_tabs(page, out, seen)
+            _drain_all()
+            # Dropdown pickers exploration (with button submission and pagination)
             self._walk_selects(page, out, seen)
-            for r in responses[:400]:
-                try:
-                    ct = (r.headers or {}).get("content-type", "")
-                    if r.status >= 400:
-                        continue
-                    if "json" in ct.lower():
-                        body = r.text()
-                        if len(body) > 8_000_000:
-                            continue
-                        out.json_payloads.append((normalize_url(r.url) or r.url, json.loads(body)))
-                    elif "html" in ct.lower() or "xml" in ct.lower():
-                        body = r.text()
-                        if len(body) > 8_000_000:
-                            continue
-                        # Inject base tag so relative links inside XHR HTML resolve correctly
-                        if "<base" not in body.lower():
-                            body = f'<base href="{r.url}">\n' + body
-                        self._add_snapshot(out, f"xhr_html:{r.url}", body, seen)
-                except Exception:
+            _drain_all()
+
+            seen_xhr = set()
+            for r_url, ct, body in captured_xhr[:400]:
+                norm_u = normalize_url(r_url) or r_url
+                if norm_u in seen_xhr:
                     continue
+                seen_xhr.add(norm_u)
+                if "json" in ct.lower():
+                    try:
+                        out.json_payloads.append((norm_u, json.loads(body)))
+                    except Exception:
+                        pass
+                elif "html" in ct.lower() or "xml" in ct.lower():
+                    if "<base" not in body.lower():
+                        body = f'<base href="{r_url}">\n' + body
+                    self._add_snapshot(out, f"xhr_html:{r_url}", body, seen)
         except Exception as e:
             out.error = f"render_error:{type(e).__name__}:{str(e)[:150]}"
         finally:
@@ -1070,21 +1149,49 @@ class Browser:
     def _expand(self, page, out: RenderResult, seen: set) -> None:
         clicks = 0
         start_url = page.url
-        selectors = ["button[aria-expanded='false']", "[role='button'][aria-expanded='false']",
-                     "details:not([open]) > summary", ".accordion-button.collapsed",
-                     "[data-toggle='collapse'], [data-bs-toggle='collapse']"]
+        # Strictly closed selectors to avoid closing open sections
+        selectors = [
+            "button[aria-expanded='false']",
+            "[role='button'][aria-expanded='false']",
+            "details:not([open]) > summary",
+            ".accordion-button.collapsed",
+            "[data-toggle='collapse'].collapsed",
+            "[data-toggle='collapse'][aria-expanded='false']",
+            "[data-bs-toggle='collapse'].collapsed",
+            "[data-bs-toggle='collapse'][aria-expanded='false']"
+        ]
         for sel in selectors:
             try:
-                loc = page.locator(sel)
-                for i in range(min(loc.count(), MAX_EXPAND_CLICKS)):
+                # Query only unvisited elements using :not([data-crawler-expanded])
+                query = f"{sel}:not([data-crawler-expanded])"
+                loc = page.locator(query)
+                count = min(loc.count(), MAX_EXPAND_CLICKS)
+                for _ in range(count):
                     if clicks >= MAX_EXPAND_CLICKS:
                         break
                     try:
-                        loc.nth(i).click(timeout=1500)
+                        # Re-query unexpanded elements and always pick .first:
+                        # Marking with data-crawler-expanded="true" ensures .first always advances to the next item
+                        # without skipping every other item
+                        curr_loc = page.locator(query)
+                        if curr_loc.count() == 0:
+                            break
+                        el = curr_loc.first
+                        el.evaluate("e => e.setAttribute('data-crawler-expanded', 'true')")
+                        name = ""
+                        try:
+                            name = clean_text(el.inner_text(timeout=500), 40)
+                        except Exception:
+                            pass
+                        el.click(timeout=1500)
                         clicks += 1
-                        page.wait_for_timeout(150)
+                        page.wait_for_timeout(200)
                         if page.url != start_url:
                             page.go_back(wait_until="domcontentloaded")
+                        else:
+                            # Take snapshot after each panel opens so "one open at a time" accordions
+                            # are not lost when the next click closes this one
+                            self._add_snapshot(out, f"expand:'{name or clicks}'", page.content(), seen)
                     except Exception:
                         continue
             except Exception:
@@ -1120,13 +1227,15 @@ class Browser:
                 t.click(timeout=1500)
                 page.wait_for_timeout(600)
                 self._add_snapshot(out, f"tab:'{name}'", page.content(), seen)
+                # Paginate on this tab so tabs 1 to n-1 are also explored
+                self._paginate(page, out, seen, prefix=f"tab:'{name}' > pagination")
                 if page.url != start_url:
-                    page.go_back(wait_until="domcontentloaded")
+                    page.goto(start_url, wait_until="domcontentloaded")
                     tabs = page.locator("[role='tab']")
             except Exception:
                 continue
 
-    def _paginate(self, page, out: RenderResult, seen: set) -> None:
+    def _paginate(self, page, out: RenderResult, seen: set, prefix: str = "pagination") -> None:
         nxt = re.compile(r"^\s*(next|next page|›|»|>)\s*$", re.I)
         for step in range(MAX_PAGINATION_STEPS):
             try:
@@ -1140,11 +1249,11 @@ class Browser:
                 page.wait_for_timeout(1200)
                 html = page.content()
                 n_before = len(out.snapshots)
-                self._add_snapshot(out, f"pagination:page {step + 2}", html, seen)
+                self._add_snapshot(out, f"{prefix}:page {step + 2}", html, seen)
                 if len(out.snapshots) == n_before:
                     return       # nothing new: last page reached
                 if page.url != before:
-                    out.nav_links.append((f"pagination:page {step + 2}", page.url, f"page {step + 2}"))
+                    out.nav_links.append((f"{prefix}:page {step + 2}", page.url, f"page {step + 2}"))
             except Exception:
                 return
 
@@ -1155,6 +1264,7 @@ class Browser:
             n_sel = min(selects.count(), 4)
         except Exception:
             return
+        start_url = page.url
         tried = 0
         for s in range(n_sel):
             try:
@@ -1168,18 +1278,52 @@ class Browser:
                 if tried >= MAX_SELECT_OPTIONS:
                     return
                 tried += 1
-                label = f"select[{clean_text(sel_name, 40)}]='{clean_text(text, 40) or value}'"
+                clean_opt = clean_text(text, 40) or value
+                label = f"select[{clean_text(sel_name, 40)}]='{clean_opt}'"
                 try:
-                    before = page.url
+                    before_url = page.url
                     sel.select_option(value, timeout=1500)
                     page.wait_for_timeout(700)
-                    if page.url != before:
+
+                    # Look for a "Go", "Search", "Submit", "Filter", "Apply" button if selection didn't auto-navigate
+                    if page.url == before_url:
+                        submit_btn = None
+                        try:
+                            # 1. Enclosing form
+                            form = sel.locator("xpath=ancestor::form[1]")
+                            if form.count() > 0:
+                                cand = form.locator("button[type='submit'], input[type='submit'], button:has-text('Go'), button:has-text('Search'), button:has-text('Submit'), button:has-text('Filter'), button:has-text('Apply')")
+                                if cand.count() > 0 and cand.first.is_visible():
+                                    submit_btn = cand.first
+                            # 2. Adjacent container or sibling button
+                            if not submit_btn:
+                                parent = sel.locator("xpath=ancestor::div[1]")
+                                if parent.count() > 0:
+                                    cand = parent.locator("button, input[type='submit'], input[type='button']")
+                                    for b_idx in range(min(cand.count(), 5)):
+                                        b = cand.nth(b_idx)
+                                        b_text = (b.inner_text(timeout=300) or b.get_attribute("value") or "").strip().lower()
+                                        if re.match(r"^(go|search|submit|view|filter|apply|find)\b", b_text):
+                                            submit_btn = b
+                                            break
+                            if submit_btn:
+                                submit_btn.click(timeout=2000)
+                                page.wait_for_timeout(1000)
+                        except Exception:
+                            pass
+
+                    if page.url != before_url:
                         out.nav_links.append((label, page.url, text))
-                        page.go_back(wait_until="domcontentloaded")
+                    self._add_snapshot(out, label, page.content(), seen)
+
+                    # Paginate on pages reached through this state/plan dropdown
+                    self._paginate(page, out, seen, prefix=f"{label} > pagination")
+
+                    # Restore page so next option starts clean
+                    if page.url != start_url:
+                        page.goto(start_url, wait_until="domcontentloaded")
                         selects = page.locator("select")
                         sel = selects.nth(s)
-                    else:
-                        self._add_snapshot(out, label, page.content(), seen)
                 except Exception:
                     continue
 

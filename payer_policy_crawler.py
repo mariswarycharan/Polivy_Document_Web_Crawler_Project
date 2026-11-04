@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 
+import codecs
 import csv
 import gzip
 import json
@@ -27,7 +28,7 @@ try:
 except ImportError:  # pragma: no cover
     etree = None
 
-from crawler_config import (MAX_LISTING_PAGES, HOST_MAX_REFUSALS, RELATED_TRIAL_MAX_REFUSALS, RELATED_TRIAL_BRAND_PAGES, RELATED_TRIAL_MAX_PAGES, RELATED_TRIAL_MIN_DOCS, CDN_TRUST_MIN_DOCS, HUB_FAMILY_MIN_LINKS, PAGE_SKIP_RECORD_MIN_SCORE, EXCLUDED_DOC_TYPES, PARALLEL_PAYERS, STOP, PREFETCH_AHEAD, BROWSER_RETRY_ON_BOT_CHALLENGE, COLUMNS, DOC_CANDIDATE_MIN_SCORE, DOC_DONE_STATES, ENUMS, EXTERNAL_DOC_MIN_SCORE, EXTRA_START_URLS, HOMEPAGE_URL, HUB_INHERIT_MAX_BONUS, HUB_INHERIT_MIN_SCORE, KNOWN_PATTERN_MIN_DOCS, LLM_FOR_MISSING_FIELDS, MAX_DEPTH, MAX_DOCUMENTS_PER_PAYER, MAX_PAGES_PER_PAYER, MAX_PARSE_BYTES, MAX_RENDERS_PER_PAYER, MAX_SITEMAP_FILES, MAX_SITEMAP_URLS, MAYBE_DOC_MIN_SCORE, NAV_FOLLOW_MIN_SCORE, NOTES_MAX_CHARS, OLLAMA_MODEL, OUTPUT_DIR, PAGE_DONE_STATES, PAGE_FOLLOW_MIN_SCORE, PAYER_NAME, PAYER_REGISTRY, ProgressUI, RELATED_DOMAIN_DEPTH_BUDGET, RELATED_DOMAIN_MIN_SCORE, RESET_PAYER_STATE, REVISION_POLICY, RUN_ALL_PAYERS, SAVE_DOCUMENT_FILES, SEED_LIST_CSV, STATE_DB, STATE_JOINER, STATE_NATIONAL, UNFETCHED_DOC_ROW_MIN_SCORE, log, setup_logging, utc_now_iso)
+from crawler_config import (RECRAWL_PAGES_AFTER_DAYS, REFRESH_SITEMAPS_ON_RERUN, MAX_LISTING_PAGES, HOST_MAX_REFUSALS, RELATED_TRIAL_MAX_REFUSALS, RELATED_TRIAL_BRAND_PAGES, RELATED_TRIAL_MAX_PAGES, RELATED_TRIAL_MIN_DOCS, CDN_TRUST_MIN_DOCS, HUB_FAMILY_MIN_LINKS, PAGE_SKIP_RECORD_MIN_SCORE, EXCLUDED_DOC_TYPES, PARALLEL_PAYERS, STOP, PREFETCH_AHEAD, BROWSER_RETRY_ON_BOT_CHALLENGE, COLUMNS, DOC_CANDIDATE_MIN_SCORE, DOC_DONE_STATES, ENUMS, EXTERNAL_DOC_MIN_SCORE, EXTRA_START_URLS, HOMEPAGE_URL, HUB_INHERIT_MAX_BONUS, HUB_INHERIT_MIN_SCORE, KNOWN_PATTERN_MIN_DOCS, LLM_FOR_MISSING_FIELDS, MAX_DEPTH, MAX_DOCUMENTS_PER_PAYER, MAX_PAGES_PER_PAYER, MAX_PARSE_BYTES, MAX_RENDERS_PER_PAYER, MAX_SITEMAP_FILES, MAX_SITEMAP_URLS, MAYBE_DOC_MIN_SCORE, NAV_FOLLOW_MIN_SCORE, NOTES_MAX_CHARS, OLLAMA_MODEL, OUTPUT_DIR, PAGE_DONE_STATES, PAGE_FOLLOW_MIN_SCORE, PAYER_NAME, PAYER_REGISTRY, ProgressUI, RELATED_DOMAIN_DEPTH_BUDGET, RELATED_DOMAIN_MIN_SCORE, RESET_PAYER_STATE, REVISION_POLICY, RUN_ALL_PAYERS, SAVE_DOCUMENT_FILES, SEED_LIST_CSV, STATE_DB, STATE_JOINER, STATE_NATIONAL, UNFETCHED_DOC_ROW_MIN_SCORE, log, setup_logging, utc_now_iso)
 from crawler_io import (Browser, FetchResult, Fetcher, Inspection, Link, RenderResult, VIA_BY_ORIGIN, extract_links, inspect_content, inspect_html, is_auth_block, links_from_json, needs_js, sniff_file_type)
 from crawler_state import (LLMClassifier, PolicyRow, StateDB, load_schema_dictionary)
 from crawler_text import (is_boilerplate_header, title_from_text, is_pagination_link, declared_count, cdn_tenant, DOC_EXTS, excluded_doc_type, THIRD_PARTY_BLOCKLIST, classify_doc_type, clean_anchor, clean_text, content_fingerprint, detect_lob, detect_state, extract_dates, extract_policy_number, html_policy_evidence, is_cdn_host, is_good_title, join_notes, link_kind, normalize_url, parse_date, reg_domain, register_brands, score_link, sha256_hex, short_url, text_fingerprint, title_from_filename, trim_title, url_ext, url_key, url_words)
@@ -59,9 +60,50 @@ def _hints(item: dict) -> dict:
     return dict(h or {})
 
 
-def _charset(content_type: str) -> str:
-    m = re.search(r"charset=([\w\-]+)", content_type or "", re.I)
-    return m.group(1) if m else ""
+def _validate_encoding(enc: str) -> str:
+    if not enc:
+        return ""
+    name = enc.strip().strip("'\"").lower()
+    if name in ("utf8mb4", "utf-8-mb4", "utf8"):
+        return "utf-8"
+    try:
+        codecs.lookup(name)
+        return name
+    except LookupError:
+        return ""
+
+
+def _charset(content_type: str, content: bytes = b"") -> str:
+    m = re.search(r"charset=([^\s;\'\"]+)", content_type or "", re.I)
+    if m:
+        valid = _validate_encoding(m.group(1))
+        if valid:
+            return valid
+    if content:
+        head = content[:4096]
+        m_meta = re.search(rb"""<meta[^>]+charset=['"]?([\w\-]+)""", head, re.I)
+        if not m_meta:
+            m_meta = re.search(rb"""<meta[^>]+http-equiv=['"]?Content-Type['"]?[^>]+content=['"][^'"]*charset=([\w\-]+)""", head, re.I)
+        if not m_meta:
+            m_meta = re.search(rb"""<meta[^>]+content=['"][^'"]*charset=([\w\-]+)['"][^>]+http-equiv=['"]?Content-Type""", head, re.I)
+        if m_meta:
+            try:
+                valid = _validate_encoding(m_meta.group(1).decode("ascii", "ignore"))
+                if valid:
+                    return valid
+            except Exception:
+                pass
+    return ""
+
+
+def decode_html(content: bytes, content_type: str = "") -> str:
+    if not content:
+        return ""
+    enc = _charset(content_type, content) or "utf-8"
+    try:
+        return content.decode(enc, "ignore")
+    except (LookupError, UnicodeDecodeError):
+        return content.decode("utf-8", "ignore")
 
 
 def _safe(s: str) -> str:
@@ -164,6 +206,47 @@ class PayerCrawler:
         n = self.db.recover_in_progress(self.name)
         if n:
             log(logging.INFO, "resume", payer=self.name, requeued=n)
+        n_transient = self.db.recover_transient_failures(self.name)
+        if n_transient:
+            log(logging.INFO, "recovered_transient_failures", payer=self.name, requeued=n_transient)
+
+        # Check EXTRA_START_URLS: pick up new settings without requiring a full reset
+        curr_extra = [normalize_url(u) for u in (EXTRA_START_URLS if self.p.get("is_current") else [])]
+        curr_extra = [u for u in curr_extra if u]
+        if curr_extra:
+            new_seeds = False
+            for u in curr_extra:
+                k = url_key(u)
+                self.home_domains.add(reg_domain(urlparse(u).hostname or ""))
+                h = f"{urlparse(u).scheme}://{urlparse(u).netloc}"
+                if h not in self.home_hosts:
+                    self.home_hosts.append(h)
+                row = self.db.con.execute("SELECT status FROM frontier WHERE payer=? AND key=?", (self.name, k)).fetchone()
+                if row is None:
+                    new_seeds = True
+                    self.db.enqueue(self.name, dict(url=u, kind="page", priority=100, depth=0, budget=MAX_DEPTH,
+                                                    source_page_url=u,
+                                                    discovery_path=f"seed:{self.p.get('hint_host')} > extra_start_url > page({u})",
+                                                    link_score=10, route="seed", hints={"_via": "css_selector"}))
+                elif row["status"] in ("done", "rejected", "failed"):
+                    new_seeds = True
+                    self.db.con.execute("UPDATE frontier SET status='pending', priority=100, depth=0, updated_at=? WHERE payer=? AND key=?",
+                                        (utc_now_iso(), self.name, k))
+            if new_seeds:
+                self._save_domains()
+                self.db.unmark_phase(self.name, "resolve")
+                self.db.unmark_phase(self.name, "sitemaps")
+
+        # Re-check sitemaps on re-runs to discover newly added policies
+        if REFRESH_SITEMAPS_ON_RERUN:
+            self.db.unmark_phase(self.name, "sitemaps")
+
+        # Re-crawl stale pages so periodic runs discover updated or newly added links
+        if RECRAWL_PAGES_AFTER_DAYS > 0:
+            reopened = self.db.reopen_stale_pages(self.name, RECRAWL_PAGES_AFTER_DAYS)
+            if reopened:
+                log(logging.INFO, "reopened_stale_pages", payer=self.name, count=reopened)
+
         if not self.db.phase_done(self.name, "robots_revalidated"):
             self.revalidate_robots()
             self.db.mark_phase(self.name, "robots_revalidated")
@@ -486,6 +569,7 @@ class PayerCrawler:
 
     # ---------------------------------------------------------------- crawl loop
     def phase_crawl(self) -> None:
+        retried_transient = False
         while True:
             if STOP.is_set():
                 raise KeyboardInterrupt      # parallel run interrupted: same clean stop as Ctrl+C in a single run
@@ -501,6 +585,13 @@ class PayerCrawler:
                     break
                 item = self.db.next_item(self.name, ("page",))
                 if item is None:
+                    # Retry temporary failures (timeouts, 5xx, connection glitches) once later in the run
+                    if not retried_transient:
+                        n_retried = self.db.recover_transient_failures(self.name)
+                        if n_retried > 0:
+                            retried_transient = True
+                            log(logging.INFO, "retrying_transient_failures", payer=self.name, count=n_retried)
+                            continue
                     break
             self.ui.update(self.db, self.name, item["url"])
             if PREFETCH_AHEAD > 0:      # the next items are fetched in the background while this one is processed
@@ -566,7 +657,7 @@ class PayerCrawler:
             self.docs_done += 1
             self.process_document(item, prefetched=r)
             return
-        html = r.content.decode(_charset(r.content_type) or "utf-8", "ignore")
+        html = decode_html(r.content, r.content_type)
         trial_dom = reg_domain(urlparse(url).hostname or "")
         if trial_dom in self.related_trial:
             self._trial_page(trial_dom, html)
@@ -673,6 +764,8 @@ class PayerCrawler:
             path = f"{parent_path} > {step}"
             hints = dict(l.hints or {})
             hints["_via"] = via
+            if l.label:
+                hints["interaction_label"] = l.label
             in_scope = dom in self.home_domains or dom in self.related_domains
             if kind == "page" and in_scope and hub_score >= HUB_INHERIT_MIN_SCORE and is_pagination_link(l.url, page_url):
                 listing = _hub_base(page_url)
@@ -696,18 +789,7 @@ class PayerCrawler:
                     sc = round(sc + min(HUB_INHERIT_MAX_BONUS, 0.25 * hub_score), 2)
                     sig = sig + ["hub_inherit"]
 
-            # BUG FIX 2: HTML policy pages (kind=="page") listed on a hub now also receive the hub
-            # bonus. Previously only "doc"/"maybe_doc" kinds were boosted. Payers that publish
-            # policies as HTML pages (not PDFs) were systematically under-scored and missed because
-            # their HTML links got no hub_inherit boost, causing them to fail the page-follow threshold.
-            elif kind == "page" and page_is_hub and in_scope and sc >= 0:
-                sc = round(sc + min(HUB_INHERIT_MAX_BONUS, 0.25 * hub_score), 2)
-                sig = sig + ["hub_inherit_html"]
-
                 # === Baseline score for CDN documents ===
-                # CDNs often have generic anchors (e.g., "Download") and opaque URLs. 
-                # If it's a valid document extension and linked from an in-scope page, 
-                # guarantee it meets the minimum threshold to be fetched and inspected.
                 if is_cdn_host(host) and url_ext(l.url) in DOC_EXTS:
                     sc = max(sc, DOC_CANDIDATE_MIN_SCORE)
                     sig.append("cdn_doc_baseline")
@@ -733,7 +815,15 @@ class PayerCrawler:
                                 f"Anchor text: '{clean_anchor(l.anchor)[:100]}'.")
                     
                     self.db.skip_link(self.name, l.url, page_url, l.anchor, sc, hub_score, reason_text, l.heading, page_ctx)
-                    continue
+                continue
+
+            # BUG FIX 2: HTML policy pages (kind=="page") listed on a hub now also receive the hub
+            # bonus. Previously only "doc"/"maybe_doc" kinds were boosted. Payers that publish
+            # policies as HTML pages (not PDFs) were systematically under-scored and missed because
+            # their HTML links got no hub_inherit boost, causing them to fail the page-follow threshold.
+            elif kind == "page" and page_is_hub and in_scope and sc >= 0:
+                sc = round(sc + min(HUB_INHERIT_MAX_BONUS, 0.25 * hub_score), 2)
+                sig = sig + ["hub_inherit_html"]
             
             if kind == "sitemap" or budget <= 0 or depth > MAX_DEPTH:
                 continue
@@ -779,7 +869,7 @@ class PayerCrawler:
         if int(item["depth"]) == 0:
             return
         page_url = r.final_url or item["url"]
-        if self.db.doc_accepted(self.name, url_key(page_url)):
+        if self.db.doc_downloaded(self.name, url_key(page_url)):
             return
         best: Optional[tuple] = None
         seen: set[str] = set()
@@ -803,7 +893,7 @@ class PayerCrawler:
     # ---------------------------------------------------------------- documents
     def process_document(self, item: dict, prefetched: Optional[FetchResult] = None) -> None:
         url, key = item["url"], item["key"]
-        if self.db.doc_accepted(self.name, key):
+        if self.db.doc_downloaded(self.name, key):
             self.db.finish(self.name, key, "rejected", "duplicate_url")
             return
         if prefetched is None and self._host_is_refused(item):
@@ -823,14 +913,27 @@ class PayerCrawler:
             self._finalize_unfetched(item, r)
             return
         final_key = url_key(r.final_url) if r.final_url else key
-        if final_key != key and self.db.doc_accepted(self.name, final_key):
+        if final_key != key and self.db.doc_downloaded(self.name, final_key):
             self.db.finish(self.name, key, "rejected", f"redirects_to_known_document:{r.final_url}")
             return
         ins = inspect_content(r.content, r.content_type, r.final_url or url, self.alias)
         cscore, csig = content_fingerprint(ins.text)
         if ins.file_type == "html":
-            # a "document" link that serves HTML: viewer page, landing page or an HTML policy page
-            html = r.content.decode(_charset(r.content_type) or "utf-8", "ignore")
+            html = decode_html(r.content, r.content_type)
+            # If the HTML document lacks readable text (e.g. an SPA client route), render via browser
+            if not ins.readable and self._can_render() and needs_js(html):
+                rr = self.br.render(r.final_url or url)
+                if rr.snapshots and not rr.blocked:
+                    snap_body = rr.snapshots[-1][1].encode("utf-8", "ignore")
+                    rendered_ins = inspect_html(snap_body, rr.final_url or url, self.alias)
+                    if rendered_ins.readable or len(clean_text(rendered_ins.text)) > len(clean_text(ins.text)):
+                        ins = rendered_ins
+                        html = rr.snapshots[-1][1]
+                        cscore, csig = content_fingerprint(ins.text)
+                        r.content = snap_body
+                        r.sha256 = sha256_hex(snap_body)
+                        r.size = len(snap_body)
+                        r.via_browser = True
             links, ctx = extract_links(html, r.final_url or url)
             is_doc, cscore, csig = html_policy_evidence(ins)
             if not is_doc:
@@ -906,7 +1009,12 @@ class PayerCrawler:
         anchor = clean_anchor(item.get("anchor") or "")
         title = anchor if is_good_title(anchor, self.alias) else title_from_filename(url)
         own = " ".join([anchor, url_words(url)])
-        around = " ".join(x for x in [item.get("heading") or "", item.get("page_ctx") or ""] if x)
+        interaction = hints.get("interaction_label") or ""
+        if not interaction and item.get("discovery_path"):
+            m = re.findall(r"(?:select\[[^\]]+\]|tab):'([^']+)'", item["discovery_path"])
+            if m:
+                interaction = " ".join(m)
+        around = " ".join(x for x in [item.get("heading") or "", item.get("page_ctx") or "", interaction] if x)
         dtype, _, reimb = classify_doc_type(own, around=around)
         lob, _ = detect_lob(own, "", around)
         state, ssrc = detect_state(url, own, "", around, self.footprint)
@@ -1036,7 +1144,12 @@ class PayerCrawler:
         hints = _hints(item)
         via = hints.get("_via", "css_selector")
         anchor = clean_anchor(item.get("anchor") or "")
-        around = " ".join(x for x in [item.get("heading") or "", item.get("page_ctx") or ""] if x)
+        interaction = hints.get("interaction_label") or ""
+        if not interaction and item.get("discovery_path"):
+            m = re.findall(r"(?:select\[[^\]]+\]|tab):'([^']+)'", item["discovery_path"])
+            if m:
+                interaction = " ".join(m)
+        around = " ".join(x for x in [item.get("heading") or "", item.get("page_ctx") or "", interaction] if x)
         notes: list[str] = list(ins.notes)
         penalty = 0.0
         llm_used = False
@@ -1057,9 +1170,25 @@ class PayerCrawler:
         if ins.canonical_url:
             cdom = reg_domain(urlparse(ins.canonical_url).hostname or "")
             if cdom in self.home_domains | self.related_domains:
-                canon_key = url_key(ins.canonical_url)
-                if canon_key != doc_key and self.db.doc_accepted(self.name, canon_key):
-                    return reject(f"duplicate: canonical URL {ins.canonical_url} already recorded")
+                c_path = (urlparse(ins.canonical_url).path or "").rstrip("/")
+                # Reject generic/root canonical URLs like / or /policies or /home
+                is_generic = (not c_path or c_path in ("/", "/policies", "/policy", "/coverage", "/home", "/index")
+                              or len(c_path) <= 3)
+                if not is_generic:
+                    ck = url_key(ins.canonical_url)
+                    if ck != doc_key:
+                        existing = self.db.doc_state(self.name, ck)
+                        if existing and self.db.doc_downloaded(self.name, ck):
+                            try:
+                                ex_row = json.loads(existing["row_json"] or "{}")
+                                ex_title = clean_text(ex_row.get("document_title", "")).lower()
+                                title_guess = ins.heading_title or (ins.titles[0] if ins.titles else "") or anchor
+                                cur_title = clean_text(title_guess).lower()
+                                if ex_title and cur_title and (ex_title == cur_title or ex_title in cur_title or cur_title in ex_title):
+                                    return reject(f"duplicate: canonical URL {ins.canonical_url} already recorded with matching title")
+                            except Exception:
+                                pass
+                        canon_key = ck
         decision["canonical_key"] = canon_key if canon_key and canon_key != doc_key else ""
 
         # -------- ownership: documents on hosts the payer does not own must name the payer
@@ -1084,11 +1213,13 @@ class PayerCrawler:
             penalty += 0.05
 
         # -------- decision (Gate 1 + Gate 2, Gate 3 when ambiguous)
-        verdict, conf, reason = self._decide(ls, cscore, ins.readable)
+        verdict, conf, reason = self._decide(ls, cscore, ins.readable, ins.file_type)
+        if verdict == "ambiguous" and ins.file_type in ("doc", "xls"):
+            verdict, conf, reason = "accept", 0.55, f"legacy {ins.file_type} binary document accepted on link evidence"
         llm_res = None
         if verdict == "ambiguous":
             title_guess = ins.heading_title or (ins.titles[0] if ins.titles else "") or anchor
-            llm_res = self.llm.classify(self.name, document_url, anchor, around, title_guess, ins.text)
+            llm_res = self.llm.classify(self.name, document_url, anchor, around, title_guess, ins.text, is_disambiguation=True)
             if llm_res is None:
                 if cscore >= 3 or ls >= 5:
                     verdict, conf, reason = "accept", 0.50, "mixed rule evidence, accepted without LLM confirmation"
@@ -1125,7 +1256,7 @@ class PayerCrawler:
         lob, lsrc = detect_lob(own, header, ctx, text.lstrip())
         state, ssrc = detect_state(document_url, own, header, ctx, self.footprint)
         if LLM_FOR_MISSING_FIELDS and ins.readable and not llm_res and (lob == "Unknown" or (dtype == "other" and not reimb)):
-            llm_res = self.llm.classify(self.name, document_url, anchor, around, title, text)
+            llm_res = self.llm.classify(self.name, document_url, anchor, around, title, text, is_disambiguation=False)
             decision["llm"] = llm_res
         if llm_res:
             if dtype == "other" and not reimb and llm_res["document_type"] != "other":
@@ -1147,14 +1278,20 @@ class PayerCrawler:
             notes.append("document type unclear - typed other")
             penalty += 0.05
         if lsrc == "listing page":
-            notes.append("line_of_business taken from the listing page heading/URL")
+            if "select" in interaction.lower():
+                notes.append("line_of_business taken from the selected dropdown option")
+            else:
+                notes.append("line_of_business taken from the listing page heading/URL")
         elif lsrc == "document body":
             notes.append("line_of_business taken from the opening of the document")
         if ssrc == "payer footprint":
             notes.append(f"state inferred from payer's single-state footprint ({self.footprint})")
             penalty += 0.05
         elif ssrc == "listing page":
-            notes.append("state taken from the listing page heading")
+            if "select" in interaction.lower():
+                notes.append("state taken from the selected dropdown option")
+            else:
+                notes.append("state taken from the listing page heading")
         dates = extract_dates(text, ins.tail_text)
         notes += dates["notes"]
         eff, upd = dates["effective_date"], dates["last_updated_date"]
@@ -1203,7 +1340,7 @@ class PayerCrawler:
             methods.append({"pdf": "pdf_text", "html": "css_selector"}.get(ins.file_type, "regex"))
         if regex_used:
             methods.append("regex")
-        if r.via_browser:
+        if r.via_browser or item.get("render_mode") == "headless" or "render:headless" in item.get("discovery_path", ""):
             render_mode = "headless"
         elif via == "json_api" and _API_URL_RX.search(document_url):
             render_mode = "api"
@@ -1244,7 +1381,7 @@ class PayerCrawler:
             conf=round(conf, 2), title=title[:80])
 
     @staticmethod
-    def _decide(ls: float, cs: float, readable: bool) -> tuple[str, float, str]:
+    def _decide(ls: float, cs: float, readable: bool, file_type: str = "") -> tuple[str, float, str]:
         if cs <= -4:
             return "reject", 0.0, "negative content fingerprint (privacy notice, EOC, press release ...)"
         if cs >= 6:
@@ -1255,6 +1392,8 @@ class PayerCrawler:
             return "accept", 0.68, "strong link context, weak content confirmation"
         if not readable and ls >= 6:
             return "accept", 0.52, "strong link context; content not machine-readable, not verified"
+        if file_type in ("doc", "xls") and ls >= 3:
+            return "accept", 0.55, f"legacy {file_type} binary format accepted on link evidence"
         if cs >= 2 or ls >= 3:
             return "ambiguous", 0.0, "mixed evidence"
         return "reject", 0.0, "no policy evidence"
@@ -1346,8 +1485,11 @@ def _completeness(r: dict) -> int:
 
 
 def _rank(r: dict) -> tuple:
-    """Which copy to keep: on the payer's own domain, fetched OK, most complete, most confident, shortest URL."""
-    return (r["_owner"], 0 if int(r["http_status"]) == 200 else 1, -_completeness(r), -float(r["confidence_score"]),
+    """Which copy to keep: on the payer's own domain, fetched OK, most complete, newest updated date, most confident, shortest URL."""
+    upd = r.get("last_updated_date") or ""
+    date_key = (0, "".join(chr(0xFFFF - ord(ch)) for ch in upd[:10])) if (upd and upd[:4].isdigit()) else (1, "")
+    return (r["_owner"], 0 if int(r["http_status"]) == 200 else 1, -_completeness(r),
+            date_key, -float(r["confidence_score"]),
             len(r["document_url"]), r["document_url"])
 
 
@@ -1779,9 +1921,28 @@ def build_rows(db: StateDB) -> tuple[list[dict], list[dict]]:
     rows = kept
     ok = lambda r: r["requires_auth"] == "N" and bool(r["content_hash_sha256"])
     # 2) same bytes at several URLs, 3) same normalised text, 4) same canonical URL
-    rows = _collapse(rows, lambda r: (r["payer_name"], r["content_hash_sha256"]) if ok(r) else None, "identical_sha256", "Identical file content (exact SHA-256 hash match). Kept the version with better ownership/status.", removed)
+    def _sha256_dedup_key(r: dict) -> Optional[tuple]:
+        if not ok(r):
+            return None
+        h = r["content_hash_sha256"]
+        # SPA shells have identical HTML hashes; group by hash AND normalized title so distinct SPA pages are not lost
+        if r.get("file_type") == "html" or r.get("render_mode") == "headless":
+            title_norm = re.sub(r"[^a-z0-9]+", "", (r.get("document_title") or "").lower())
+            return (r["payer_name"], h, title_norm or url_key(r["document_url"]))
+        return (r["payer_name"], h)
+
+    def _canon_dedup_key(r: dict) -> Optional[tuple]:
+        c = r.get("_canon")
+        if not c:
+            return None
+        title_norm = re.sub(r"[^a-z0-9]+", "", (r.get("document_title") or "").lower())
+        if not title_norm:
+            return None
+        return (r["payer_name"], c, title_norm[:40])
+
+    rows = _collapse(rows, _sha256_dedup_key, "identical_sha256", "Identical file content (exact SHA-256 hash match). Kept the version with better ownership/status.", removed)
     rows = _collapse(rows, lambda r: (r["payer_name"], r["_fp"]) if ok(r) and r["_fp"] else None, "identical_text", "Identical extracted text content (near-duplicate). Kept the primary version.", removed)
-    rows = _collapse(rows, lambda r: (r["payer_name"], r["_canon"]) if r["_canon"] else None, "same_canonical_url", "Both URLs share the same HTML <link rel='canonical'> tag. Kept the canonical version.", removed)
+    rows = _collapse(rows, _canon_dedup_key, "same_canonical_url", "Both URLs share the same HTML <link rel='canonical'> tag and document title. Kept the canonical version.", removed)
     
     # 5) dated revisions
     rows = _revisions(rows, removed)
@@ -2175,7 +2336,7 @@ def _crawl_payer_worker(i: int, payer: dict, ui: ProgressUI, shared_fetcher: Fet
     llm = LLMClassifier(db)
     try:
         ui.payer_started(i, payer["payer_name"])
-        llm.calls = 0
+        llm.reset_for_payer()
         try:
             PayerCrawler(payer, db, fetcher, browser, llm, ui).run()
         except KeyboardInterrupt:
@@ -2238,7 +2399,7 @@ def main() -> None:
             payers = []              # nothing left for the sequential loop below
         for i, payer in enumerate(payers, start=1):
             ui.payer_started(i, payer["payer_name"])
-            llm.calls = 0
+            llm.reset_for_payer()
             try:
                 PayerCrawler(payer, db, fetcher, browser, llm, ui).run()
             except KeyboardInterrupt:

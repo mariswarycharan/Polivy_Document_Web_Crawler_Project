@@ -256,6 +256,7 @@ class LLMClassifier:
         self.enabled = USE_LLM
         self.calls = 0
         self.failures = 0
+        self._consecutive_connect_errors = 0
         self.http = httpx.Client(timeout=LLM_TIMEOUT_SECONDS)
         if self.enabled:
             try:
@@ -271,6 +272,12 @@ class LLMClassifier:
                 log(logging.WARNING, "llm_unavailable", error=str(e)[:150], hint="start `ollama serve`; LLM gate disabled")
                 self.enabled = False
 
+    def reset_for_payer(self) -> None:
+        self.calls = 0
+        self._consecutive_connect_errors = 0
+        if USE_LLM:
+            self.enabled = True
+
     def _schema(self) -> dict:
         return {"type": "object", "properties": {
             "is_policy_document": {"type": "boolean"},
@@ -280,8 +287,12 @@ class LLMClassifier:
             "reason": {"type": "string", "maxLength": 120}},
             "required": ["is_policy_document", "document_type", "line_of_business", "confidence", "reason"]}
 
-    def classify(self, payer: str, url: str, anchor: str, context: str, title: str, text: str) -> Optional[dict]:
+    def classify(self, payer: str, url: str, anchor: str, context: str, title: str, text: str,
+                 is_disambiguation: bool = True) -> Optional[dict]:
         if not self.enabled or self.calls >= MAX_LLM_CALLS_PER_PAYER:
+            return None
+        # Reserve remaining budget for Gate 3 disambiguation; secondary field enrichment (Unknown LOB) cannot starve Gate 3
+        if not is_disambiguation and self.calls >= (MAX_LLM_CALLS_PER_PAYER - 150):
             return None
         evidence = (f"PAYER: {payer}\nURL: {url}\nLINK TEXT: {clean_text(anchor, 200)}\nPAGE CONTEXT: {clean_text(context, 300)}\n"
                     f"TITLE: {clean_text(title, 250)}\nTEXT:\n{clean_text(text, 1500)}")
@@ -310,10 +321,11 @@ class LLMClassifier:
                 r = self.http.post(f"{OLLAMA_URL}/api/chat", json=payload)
                 r.raise_for_status()
                 self.calls += 1  # Only count successful API responses to prevent burnout on timeouts
+                self._consecutive_connect_errors = 0
                 last_raw = ((r.json() or {}).get("message") or {}).get("content", "") or ""
             except httpx.ConnectError as e:
-                log(logging.WARNING, "llm_connection_lost", error=str(e)[:150])
-                self.enabled = False
+                self._consecutive_connect_errors += 1
+                log(logging.WARNING, "llm_connection_lost", error=str(e)[:150], consecutive=self._consecutive_connect_errors)
                 break
             except Exception as e:
                 log(logging.DEBUG, "llm_http_error", attempt=attempt, mode=mode, error=str(e)[:200])
@@ -381,6 +393,34 @@ class StateDB:
         self.con.commit()
         return n
 
+    def recover_transient_failures(self, payer: str) -> int:
+        """Reset temporary failures (timeouts, 5xx, connection errors, 429) back to pending so they can be retried."""
+        transient_sql = """
+            UPDATE frontier 
+            SET status='pending', reason='retrying: transient failure reset', updated_at=?
+            WHERE payer=? 
+              AND status IN ('failed', 'blocked')
+              AND (
+                  reason LIKE '%timeout%'
+                  OR reason LIKE '%timed out%'
+                  OR reason LIKE '%http_5%'
+                  OR reason LIKE '%connection%'
+                  OR reason LIKE '%transport failure%'
+                  OR reason LIKE '%rate_limited%'
+                  OR reason LIKE '%http_429%'
+                  OR reason LIKE '%status 0%'
+                  OR reason LIKE 'exception:%'
+              )
+              AND reason NOT LIKE '%404%'
+              AND reason NOT LIKE '%410%'
+              AND reason NOT LIKE '%login%'
+              AND reason NOT LIKE '%robots%'
+              AND reason NOT LIKE '%auth%'
+        """
+        n = self.con.execute(transient_sql, (utc_now_iso(), payer)).rowcount
+        self.con.commit()
+        return n
+
     def payers(self) -> list[str]:
         return [r[0] for r in self.con.execute("SELECT DISTINCT payer FROM frontier ORDER BY payer")]
 
@@ -391,6 +431,22 @@ class StateDB:
     def mark_phase(self, payer: str, phase: str) -> None:
         self.con.execute("INSERT OR REPLACE INTO phases VALUES(?,?,?)", (payer, phase, utc_now_iso()))
         self.con.commit()
+
+    def unmark_phase(self, payer: str, phase: str) -> None:
+        self.con.execute("DELETE FROM phases WHERE payer=? AND phase=?", (payer, phase))
+        self.con.commit()
+
+    def reopen_stale_pages(self, payer: str, max_age_days: int) -> int:
+        """Reopen 'done' pages older than max_age_days so re-running catches new policies."""
+        from datetime import datetime, timezone, timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+        cur = self.con.execute(
+            "UPDATE frontier SET status='pending', reason='reopened: stale page refresh', updated_at=? "
+            "WHERE payer=? AND kind='page' AND status='done' AND (updated_at < ? OR updated_at IS NULL)",
+            (utc_now_iso(), payer, cutoff)
+        )
+        self.con.commit()
+        return cur.rowcount
 
     def get(self, payer: str, k: str, default: Any = None) -> Any:
         r = self.con.execute("SELECT v FROM kv WHERE payer=? AND k=?", (payer, k)).fetchone()
@@ -403,11 +459,7 @@ class StateDB:
     # frontier
     def enqueue(self, payer: str, item: dict) -> bool:
         key = url_key(item["url"])
-        cur = self.con.execute("SELECT status, link_score FROM frontier WHERE payer=? AND key=?", (payer, key)).fetchone()
-        vals = (item["priority"], item["source_page_url"], item["discovery_path"], item.get("anchor", ""), item.get("heading", ""),
-                item.get("page_ctx", ""), json.dumps(item.get("hints", {})), item["link_score"],
-                json.dumps(item.get("signals", [])), item.get("render_mode", "static"), item.get("route", ""), item["kind"],
-                item["depth"], item.get("budget", 99))
+        cur = self.con.execute("SELECT status, link_score, reason, depth, budget FROM frontier WHERE payer=? AND key=?", (payer, key)).fetchone()
         if cur is None:
             self.con.execute("""INSERT INTO frontier(payer,key,url,kind,priority,depth,budget,source_page_url,discovery_path,anchor,heading,
                 page_ctx,hints,link_score,signals,render_mode,route,status,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?)""",
@@ -418,6 +470,12 @@ class StateDB:
                               utc_now_iso()))
             self.con.execute("DELETE FROM skipped_links WHERE payer=? AND key=?", (payer, key))
             return True
+        best_depth = min(int(item["depth"]), int(cur["depth"])) if cur["depth"] is not None else item["depth"]
+        best_budget = max(int(item.get("budget", 0)), int(cur["budget"])) if cur["budget"] is not None else item.get("budget", 99)
+        vals = (item["priority"], item["source_page_url"], item["discovery_path"], item.get("anchor", ""), item.get("heading", ""),
+                item.get("page_ctx", ""), json.dumps(item.get("hints", {})), item["link_score"],
+                json.dumps(item.get("signals", [])), item.get("render_mode", "static"), item.get("route", ""), item["kind"],
+                best_depth, best_budget)
         old = float(cur["link_score"] or 0)
         upd = """UPDATE frontier SET priority=?, source_page_url=?, discovery_path=?, anchor=?, heading=?, page_ctx=?, hints=?,
                  link_score=?, signals=?, render_mode=?, route=?, kind=?, depth=?, budget=?"""
@@ -431,6 +489,15 @@ class StateDB:
                              (*vals, utc_now_iso(), payer, key))
             log(logging.DEBUG, "candidate_reopened", payer=payer, url=item["url"], old_score=old, new_score=item["link_score"])
             return True
+        # If an item failed or was blocked due to a temporary failure (timeout, 5xx, connection, 429), retry it when seen again
+        if cur["status"] in ("failed", "blocked"):
+            r_reason = (cur["reason"] or "").lower()
+            if any(t in r_reason for t in ("timeout", "timed out", "http_5", "connection", "transport failure", "rate_limited", "http_429", "status 0", "exception:")):
+                if not any(p in r_reason for p in ("404", "410", "login", "robots", "auth")):
+                    self.con.execute(upd + ", status='pending', reason='reopened: transient failure retried', updated_at=? WHERE payer=? AND key=?",
+                                     (*vals, utc_now_iso(), payer, key))
+                    log(logging.DEBUG, "transient_failure_reopened", payer=payer, url=item["url"])
+                    return True
         return False
 
     def skip_link(self, payer: str, url: str, source: str, anchor: str, score: float, hub: float, reason: str, heading: str = "", page_context: str = "") -> None:
@@ -480,11 +547,24 @@ class StateDB:
 
     # documents
     def doc_state(self, payer: str, key: str) -> Optional[sqlite3.Row]:
-        return self.con.execute("SELECT accepted, decision FROM documents WHERE payer=? AND key=?", (payer, key)).fetchone()
+        return self.con.execute("SELECT accepted, decision, content_hash FROM documents WHERE payer=? AND key=?", (payer, key)).fetchone()
 
     def doc_accepted(self, payer: str, key: str) -> bool:
         r = self.doc_state(payer, key)
         return bool(r and r["accepted"])
+
+    def doc_downloaded(self, payer: str, key: str) -> bool:
+        """True only if the document was genuinely fetched and stored (accepted=1, non-empty content_hash, not an unfetched placeholder)."""
+        r = self.doc_state(payer, key)
+        if not r or not r["accepted"]:
+            return False
+        try:
+            dec = json.loads(r["decision"] or "{}")
+            if dec.get("unfetched"):
+                return False
+        except Exception:
+            pass
+        return bool(r["content_hash"])
 
     def save_doc(self, payer: str, key: str, url: str, accepted: bool, row: dict, decision: dict, route: str) -> None:
         self.con.execute("INSERT OR REPLACE INTO documents VALUES(?,?,?,?,?,?,?,?,?)",

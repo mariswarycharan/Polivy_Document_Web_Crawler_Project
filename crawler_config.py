@@ -133,7 +133,9 @@ MAX_LISTING_PAGES = 200          # pagination / A-Z pages followed per listing (
 HUB_FAMILY_MIN_LINKS = 6          # >= this many same-folder page links on a policy hub = a listing: every member is followed
 PAGE_SKIP_RECORD_MIN_SCORE = 1.0  # page links not followed but scoring at least this are written to skipped_doc_links.csv
 UNFETCHED_DOC_ROW_MIN_SCORE = 6.0 # strong candidate that could not be fetched still gets a (non-200) row
-REOPEN_REJECTED_SCORE_GAIN = 99.0  # a rejected document is re-evaluated if it re-appears with this much more evidence
+REOPEN_REJECTED_SCORE_GAIN = 3.0  # a rejected document is re-evaluated if it re-appears with this much more evidence
+RECRAWL_PAGES_AFTER_DAYS = 30     # re-crawl pages marked done if older than N days (0 to disable)
+REFRESH_SITEMAPS_ON_RERUN = True  # re-check sitemaps on re-runs to discover newly published policies
 
 INFER_STATE_FROM_PAYER_FOOTPRINT = True   # single-state payers: use footprint_state (noted, -0.05 confidence)
 REVISION_POLICY = "latest_only"   # "latest_only": keep the latest dated revision; older revisions and duplicates go to skipped_doc_links.csv
