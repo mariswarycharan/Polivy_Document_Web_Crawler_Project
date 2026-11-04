@@ -1252,24 +1252,61 @@ class PayerCrawler:
         if verdict == "ambiguous":
             title_guess = ins.heading_title or (ins.titles[0] if ins.titles else "") or anchor
             llm_res = self.llm.classify(self.name, document_url, anchor, around, title_guess, ins.text, is_disambiguation=True)
+            
             if llm_res is None:
                 if cscore >= 3 or ls >= 5:
                     verdict, conf, reason = "accept", 0.50, "mixed rule evidence, accepted without LLM confirmation"
                     decision["llm_unavailable"] = True
                 else:
                     verdict, reason = "reject", "mixed evidence, too weak without LLM"
-            elif llm_res["is_policy_document"] and llm_res["confidence"] >= 0.6:
-                llm_used = True
-                verdict, conf = "accept", min(0.70, 0.45 + 0.25 * llm_res["confidence"])
-                reason = f"LLM ({OLLAMA_MODEL}) confirmed: {llm_res['reason']}"
             else:
-                verdict, reason = "reject", f"LLM rejected: {llm_res.get('reason', '')}"
-        decision.update({"verdict": verdict, "reason": reason, "llm": llm_res,
-                         "text_fp": text_fingerprint(ins.fp_text or ins.text)})
-        if verdict != "accept":
-            return reject(reason)
-        if conf < 0.70:
-            notes.append(reason)
+                # Lowered LLM threshold slightly from 0.6 to 0.5 to be less strict
+                llm_accept = llm_res["is_policy_document"] and llm_res["confidence"] >= 0.5 
+                
+                # =====================================================================
+                # NEW DECISION LAYER: RULE-BASED OVERRIDE (THE "SAFETY NET")
+                # If the LLM rejects or is unsure, we check if our rule-based scores 
+                # are actually very strong. If they are, we override the LLM and accept.
+                # =====================================================================
+                rule_override = False
+                override_reason = ""
+                
+                # Condition 1: Very strong link context (e.g., clicked from a clear policy hub)
+                if ls >= 6 and cscore >= 1:
+                    rule_override = True
+                    override_reason = "Strong link context (ls>=6) with some content markers"
+                # Condition 2: Very strong content fingerprint (e.g., multiple CPT/Policy markers found)
+                elif cscore >= 4 and ls >= 2:
+                    rule_override = True
+                    override_reason = "Strong content fingerprint (cs>=4) with valid link context"
+                # Condition 3: Found in a known document repository path + moderate scores
+                elif ls >= 5 and cscore >= 2 and "repo_path" in csig:
+                    rule_override = True
+                    override_reason = "Document repository path + moderate scores"
+                
+                # Apply the Decision Tree
+                if llm_accept:
+                    llm_used = True
+                    verdict, conf = "accept", min(0.75, 0.50 + 0.25 * llm_res["confidence"])
+                    reason = f"LLM ({OLLAMA_MODEL}) confirmed: {llm_res['reason']}"
+                elif rule_override:
+                    # LLM rejected/unsure, but rule-based scores are strong enough to override
+                    llm_used = False 
+                    verdict, conf = "accept", 0.60
+                    reason = f"LLM rejected/unsure, but {override_reason}"
+                    notes.append(reason) # Add a note so you can track these overrides in the output
+                else:
+                    # LLM rejected AND rule-based scores are weak -> True Reject
+                    verdict, reason = "reject", f"LLM rejected and rule-based scores insufficient (ls={ls}, cs={cscore})"
+                    
+            decision.update({"verdict": verdict, "reason": reason, "llm": llm_res,
+                             "text_fp": text_fingerprint(ins.fp_text or ins.text)})
+                             
+            if verdict != "accept":
+                return reject(reason)
+                
+            if conf < 0.70:
+                notes.append(reason)
 
         # -------- metadata (values as printed; inferences are noted and cost confidence)
         text = ins.text or ""

@@ -9,17 +9,39 @@ import threading
 import json
 import logging
 import os
+import sys
 import time
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 try:
     from rich.console import Console
-    from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn
+    from rich.progress import (
+        BarColumn,
+        MofNCompleteColumn,
+        Progress,
+        SpinnerColumn,
+        TaskProgressColumn,
+        TextColumn,
+        TimeElapsedColumn,
+    )
     RICH_AVAILABLE = True
-except ImportError:  # pragma: no cover
-    RICH_AVAILABLE = False
+except ImportError:
+    try:
+        from rich.console import Console
+        from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn
+        SpinnerColumn = None
+        TaskProgressColumn = None
+        RICH_AVAILABLE = True
+    except ImportError:  # pragma: no cover
+        RICH_AVAILABLE = False
 
 
 from typing import TYPE_CHECKING
@@ -30,7 +52,7 @@ if TYPE_CHECKING:
 # =============================================================================
 # 1. INPUT  (edit here - no command-line arguments)
 # =============================================================================
-HOMEPAGE_URL = "https://www.centene.com"  # the payer homepage / hint host to crawl
+HOMEPAGE_URL = "https://www.uhcprovider.com"  # the payer homepage / hint host to crawl
 PAYER_NAME = ""            # "" -> looked up in PAYER_REGISTRY / payer_seed_list.csv by host
 RUN_ALL_PAYERS = False      # True -> crawl every payer in the registry (the 10 payers of the brief); --homepage URL crawls one
 EXTRA_START_URLS: list[str] = []   # optional extra entry points for the payer in HOMEPAGE_URL
@@ -186,9 +208,9 @@ LLM_FOR_MISSING_FIELDS = True     # also ask the LLM when document type / line o
 USE_OCR = True                    # Tesseract OCR for scanned PDFs (only if pytesseract is installed)
 SAVE_DOCUMENT_FILES = False       # True -> keep a copy of every accepted document under output/files
 
-PROGRESS_BAR = True               # live progress bar in the terminal (rich); plain status lines if not a TTY
-PROGRESS_REFRESH_SECONDS = 1.0
-PLAIN_STATUS_EVERY_SECONDS = 20
+PROGRESS_BAR = True               # live progress bar in the terminal (rich / ANSI); plain status lines if not a TTY
+PROGRESS_REFRESH_SECONDS = 0.08   # high-speed UI refresh (~12 fps) for immediate stat responsiveness (was 1.0s)
+PLAIN_STATUS_EVERY_SECONDS = 2.0  # frequent non-delayed status lines when piped / non-TTY (was 20s)
 CONSOLE_LOG_LEVEL = logging.INFO  # the JSON log file always gets DEBUG
 
 # =============================================================================
@@ -281,12 +303,13 @@ DOC_DONE_STATES = ("accepted", "rejected", "blocked", "failed", "skipped_robots"
 class ProgressUI:
     """Live terminal progress:
 
-        Payer 3/10 . Cigna        [bar]  3/10  0:42:10   phase: crawl . /providers/medical-policies
-          Pages crawled           [bar]  412/980  ...    queue 568 . blocked 2 . failed 7
-          Documents checked       [bar] 1203/2950 ...    accepted 1010 . rejected 160 . blocked 4 . failed 29 . queue 1747
+        Payer 3/10 · Cigna        [bar]  3/10  0:42:10   Phase: crawl · /providers/medical-policies
+          Pages crawled           [bar]  412/980  ...    Queue: 568 · Blocked: 2 · Failed: 7 · ⚡ 3.5 p/s
+          Documents checked       [bar] 1203/2950 ...    ✓ Acc: 1,010 · ✕ Rej: 160 · ⊘ Blk: 4 · ⚠ Fail: 29 · Queue: 1,747 · 🎯 Yield: 84.0% · ⚡ 14.2 d/s · ⏳ ETA: 02:15
 
-    Totals grow while new links are discovered, so bars can move back a little - that is expected.
-    Without a terminal (output piped to a file) a plain status line is printed every PLAIN_STATUS_EVERY_SECONDS.
+    Totals grow while new links are discovered.
+    Supports both Rich terminal UI and interactive ANSI terminal UI with zero update lag.
+    Without a terminal (output piped to a file) a status line is printed every PLAIN_STATUS_EVERY_SECONDS.
     """
 
     # per-thread view (payer, phase, current URL, status-line clock) so payers crawled in parallel do not overwrite each other
@@ -298,10 +321,18 @@ class ProgressUI:
     payer_idx = _tl_prop.__func__("payer_idx", 0)
     cur_phase = _tl_prop.__func__("cur_phase", "")
     current = _tl_prop.__func__("current", "")
+    _last = _tl_prop.__func__("_last", 0.0)
     _last_plain = _tl_prop.__func__("_last_plain", 0.0)
+    _start_time = _tl_prop.__func__("_start_time", 0.0)
+    _pages_speed = _tl_prop.__func__("_pages_speed", 0.0)
+    _docs_speed = _tl_prop.__func__("_docs_speed", 0.0)
+    _prev_pages_done = _tl_prop.__func__("_prev_pages_done", 0)
+    _prev_docs_done = _tl_prop.__func__("_prev_docs_done", 0)
+    _prev_speed_calc_time = _tl_prop.__func__("_prev_speed_calc_time", 0.0)
 
     def __init__(self) -> None:
         self._tl = threading.local()
+        self._lock = threading.Lock()
         self.n_payers = 1
         self.console = Console() if RICH_AVAILABLE else None
         self.use_rich = bool(PROGRESS_BAR and RICH_AVAILABLE and self.console is not None and self.console.is_terminal)
@@ -312,71 +343,237 @@ class ProgressUI:
         self.current = ""
         self._last = 0.0
         self._last_plain = 0.0
+        self._start_time = 0.0
+        self._pages_speed = 0.0
+        self._docs_speed = 0.0
+        self._prev_pages_done = 0
+        self._prev_docs_done = 0
+        self._prev_speed_calc_time = 0.0
+        self._ansi_lines_drawn = 0
         self.t_payer = self.t_pages = self.t_docs = None
 
     def start(self, n_payers: int) -> None:
         self.n_payers = max(1, n_payers)
         if not self.use_rich:
             return
-        self.progress = Progress(
-            TextColumn("{task.description}"), BarColumn(bar_width=30), MofNCompleteColumn(),
-            TimeElapsedColumn(), TextColumn("{task.fields[info]}"),
-            console=self.console, refresh_per_second=4, transient=False)
+        cols = []
+        if SpinnerColumn is not None:
+            cols.append(SpinnerColumn("dots", style="bold cyan"))
+        cols.append(TextColumn("{task.description}"))
+        cols.append(BarColumn(bar_width=25, style="grey23", complete_style="bold bright_cyan", finished_style="bold bright_green"))
+        if TaskProgressColumn is not None:
+            cols.append(TaskProgressColumn(text_format="[bold yellow]{task.percentage:>3.0f}%[/]"))
+        cols.append(MofNCompleteColumn())
+        cols.append(TimeElapsedColumn())
+        cols.append(TextColumn("{task.fields[info]}"))
+        self.progress = Progress(*cols, console=self.console, refresh_per_second=10, transient=False)
         self.progress.start()
-        self.t_payer = self.progress.add_task("Payers", total=self.n_payers, info="")
-        self.t_pages = self.progress.add_task("  Pages crawled", total=1, info="")
-        self.t_docs = self.progress.add_task("  Documents checked", total=1, info="")
+        self.t_payer = self.progress.add_task("[bold white]Payers[/]", total=self.n_payers, info="")
+        self.t_pages = self.progress.add_task("  [bold cyan]Pages crawled[/]", total=1, info="")
+        self.t_docs = self.progress.add_task("  [bold green]Documents checked[/]", total=1, info="")
 
     def print(self, text: str) -> None:
-        if self.progress is not None:
-            self.progress.console.print(text, markup=False, highlight=False, soft_wrap=True)
-        else:
-            print(text, flush=True)
+        with self._lock:
+            if self.progress is not None:
+                self.progress.console.print(text, markup=False, highlight=False, soft_wrap=True)
+            elif sys.stdout.isatty() and self._ansi_lines_drawn > 0:
+                sys.stdout.write(f"\033[{self._ansi_lines_drawn}F")
+                for _ in range(self._ansi_lines_drawn):
+                    sys.stdout.write("\033[2K\n")
+                sys.stdout.write(f"\033[{self._ansi_lines_drawn}F")
+                sys.stdout.write(self._safe_str(text.rstrip()) + "\n")
+                self._ansi_lines_drawn = 0
+                sys.stdout.flush()
+            else:
+                print(self._safe_str(text), flush=True)
 
     def payer_started(self, idx: int, name: str) -> None:
+        now = time.monotonic()
         self.payer, self.payer_idx, self.cur_phase, self.current = name, idx, "start", ""
+        self._start_time = now
+        self._prev_speed_calc_time = now
+        self._prev_pages_done = 0
+        self._prev_docs_done = 0
+        self._pages_speed = 0.0
+        self._docs_speed = 0.0
         if self.progress is not None:
-            self.progress.update(self.t_payer, description=f"Payer {idx}/{self.n_payers} · {name}",
-                                 completed=idx - 1, info="phase: start")
+            self.progress.update(self.t_payer, description=f"[bold white]Payer[/] [bold bright_cyan]{idx}/{self.n_payers}[/] · [bold magenta]{name}[/]",
+                                 completed=idx - 1, info="[bold blue]Phase:[/] [bold yellow]start[/]")
             self.progress.reset(self.t_pages, total=1, completed=0, info="")
             self.progress.reset(self.t_docs, total=1, completed=0, info="")
 
     def payer_finished(self, idx: int) -> None:
         if self.progress is not None:
-            self.progress.update(self.t_payer, completed=idx, info="phase: done")
+            self.progress.update(self.t_payer, completed=idx, info="[bold blue]Phase:[/] [bold green]done[/]")
+        elif sys.stdout.isatty() and self._ansi_lines_drawn > 0:
+            with self._lock:
+                sys.stdout.write("\n")
+                self._ansi_lines_drawn = 0
+                sys.stdout.flush()
 
     def phase(self, name: str) -> None:
         self.cur_phase = name
         if self.progress is not None:
-            self.progress.update(self.t_payer, info=f"phase: {name}")
+            self.progress.update(self.t_payer, info=f"[bold blue]Phase:[/] [bold yellow]{name}[/]")
+
+    @staticmethod
+    def _safe_str(s: str) -> str:
+        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+        try:
+            s.encode(enc)
+            return s
+        except (UnicodeEncodeError, LookupError):
+            return (
+                s.replace("✓", "acc:")
+                .replace("✕", "rej:")
+                .replace("⊘", "blk:")
+                .replace("⚠", "fail:")
+                .replace("🎯", "Yield:")
+                .replace("⚡", "Speed:")
+                .replace("⏳", "ETA:")
+                .replace("━", "=")
+                .replace("╸", ">")
+                .replace("─", "-")
+                .encode(enc, errors="replace")
+                .decode(enc, errors="replace")
+            )
 
     def update(self, db: "StateDB", payer: str, current_url: str = "", force: bool = False) -> None:
         now = time.monotonic()
         if current_url:
             self.current = current_url
-        if not force and now - self._last < PROGRESS_REFRESH_SECONDS:
+        if not force and (now - self._last) < PROGRESS_REFRESH_SECONDS:
             return
         self._last = now
+
         c = db.status_counts(payer)
         g = lambda kinds, states: sum(c.get((k, s), 0) for k in kinds for s in states)
         D = ("doc", "maybe_doc")
         pages_done = g(("page",), PAGE_DONE_STATES)
         pages_q = g(("page",), ("pending", "in_progress"))
+        pages_blk = g(("page",), ("blocked",))
+        pages_fail = g(("page",), ("failed",))
+
         docs_done = g(D, DOC_DONE_STATES)
         docs_q = g(D, ("pending", "in_progress"))
-        acc, rej, blk, fail = g(D, ("accepted",)), g(D, ("rejected",)), g(D, ("blocked",)), g(D, ("failed",))
-        cur = urlparse(self.current).path[-60:] if self.current else ""
-        if self.progress is not None:
-            self.progress.update(self.t_pages, completed=pages_done, total=max(1, pages_done + pages_q),
-                                 info=f"queue {pages_q} · blocked {g(('page',), ('blocked',))} · failed {g(('page',), ('failed',))}")
-            self.progress.update(self.t_docs, completed=docs_done, total=max(1, docs_done + docs_q),
-                                 info=f"accepted {acc} · rejected {rej} · blocked {blk} · failed {fail} · queue {docs_q}")
-            self.progress.update(self.t_payer, info=f"phase: {self.cur_phase}" + (f" · {cur}" if cur else ""))
-        elif force or now - self._last_plain >= PLAIN_STATUS_EVERY_SECONDS:
-            self._last_plain = now
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] {self.payer} ({self.payer_idx}/{self.n_payers}) "
-                  f"phase={self.cur_phase} | pages {pages_done}/{pages_done + pages_q} | docs {docs_done}/{docs_done + docs_q} "
-                  f"(accepted {acc}, rejected {rej}, blocked {blk}, failed {fail})", flush=True)
+        acc = g(D, ("accepted",))
+        rej = g(D, ("rejected",))
+        blk = g(D, ("blocked",))
+        fail = g(D, ("failed",))
+
+        # Throughput speed calculation (rolling window with smoothing)
+        if not self._start_time:
+            self._start_time = now
+            self._prev_speed_calc_time = now
+        dt_speed = now - (self._prev_speed_calc_time or now)
+        if dt_speed >= 0.4:
+            d_pages = max(0, pages_done - self._prev_pages_done)
+            d_docs = max(0, docs_done - self._prev_docs_done)
+            self._pages_speed = 0.65 * (d_pages / dt_speed) + 0.35 * self._pages_speed
+            self._docs_speed = 0.65 * (d_docs / dt_speed) + 0.35 * self._docs_speed
+            self._prev_pages_done = pages_done
+            self._prev_docs_done = docs_done
+            self._prev_speed_calc_time = now
+
+        total_elapsed = max(0.1, now - self._start_time)
+        avg_docs_speed = docs_done / total_elapsed
+        active_docs_speed = self._docs_speed if self._docs_speed > 0.05 else avg_docs_speed
+
+        # Quality yield rate
+        yield_pct = (acc / max(1, docs_done)) * 100.0 if docs_done > 0 else 0.0
+
+        # Estimated Time Remaining (ETA)
+        if docs_q > 0 and active_docs_speed > 0.05:
+            eta_sec = int(docs_q / active_docs_speed)
+            if eta_sec < 60:
+                eta_str = f"{eta_sec}s"
+            elif eta_sec < 3600:
+                eta_str = f"{eta_sec // 60}m {eta_sec % 60:02d}s"
+            else:
+                eta_str = f"{eta_sec // 3600}h {(eta_sec % 3600) // 60:02d}m"
+        elif docs_q == 0 and docs_done > 0:
+            eta_str = "0s"
+        else:
+            eta_str = "--:--"
+
+        # Short clean display of current action/target
+        cur = ""
+        if self.current:
+            pu = urlparse(self.current)
+            path = pu.path or ""
+            filename = path.rsplit("/", 1)[-1] if "/" in path else path
+            if len(filename) > 36:
+                cur = filename[:17] + "…" + filename[-17:]
+            elif filename:
+                cur = filename
+            elif pu.hostname:
+                cur = pu.hostname
+            else:
+                cur = self.current[-36:]
+
+        with self._lock:
+            if self.progress is not None:
+                p_desc = f"[bold white]Payers[/] [bold bright_cyan]{self.payer_idx}/{self.n_payers}[/] · [bold magenta]{payer}[/]"
+                p_info = f"[bold blue]Phase:[/] [bold yellow]{self.cur_phase}[/]" + (f" · [dim cyan]{cur}[/]" if cur else "")
+                self.progress.update(self.t_payer, description=p_desc, info=p_info)
+
+                pages_info = (f"[bold cyan]Queue:[/] [white]{pages_q:,}[/] · "
+                              f"[bold yellow]Blocked:[/] [yellow]{pages_blk:,}[/] · "
+                              f"[bold red]Failed:[/] [red]{pages_fail:,}[/] · "
+                              f"[bold cyan]⚡ {self._pages_speed:.1f} p/s[/]")
+                self.progress.update(self.t_pages, completed=pages_done, total=max(1, pages_done + pages_q),
+                                     info=pages_info)
+
+                docs_info = (f"[bold green]✓ Acc:[/] [bold bright_green]{acc:,}[/] · "
+                             f"[dim]✕ Rej:[/] [dim]{rej:,}[/] · "
+                             f"[bold yellow]⊘ Blk:[/] [yellow]{blk:,}[/] · "
+                             f"[bold red]⚠ Fail:[/] [red]{fail:,}[/] · "
+                             f"[bold cyan]Queue:[/] [cyan]{docs_q:,}[/] · "
+                             f"[bold bright_green]🎯 Yield:[/] [bold bright_green]{yield_pct:.1f}%[/] · "
+                             f"[bold bright_cyan]⚡ {active_docs_speed:.1f} d/s[/] · "
+                             f"[bold magenta]⏳ ETA:[/] [magenta]{eta_str}[/]")
+                self.progress.update(self.t_docs, completed=docs_done, total=max(1, docs_done + docs_q),
+                                     info=docs_info)
+
+            elif sys.stdout.isatty():
+                # Interactive ANSI terminal mode
+                def _bar(done: int, total: int, width: int = 18) -> str:
+                    t = max(1, total)
+                    p = min(1.0, max(0.0, done / t))
+                    filled = int(width * p)
+                    rem = width - filled
+                    tip = "╸" if rem > 0 and filled > 0 else ""
+                    b_str = "━" * filled + tip + "─" * max(0, rem - len(tip))
+                    return f"[\033[1;36m{b_str[:width]}\033[0m] \033[1;33m{p * 100:>4.0f}%\033[0m \033[1;37m{done:,}/{total:,}\033[0m"
+
+                bar_p = _bar(pages_done, pages_done + pages_q)
+                bar_d = _bar(docs_done, docs_done + docs_q)
+                active_str = f" · \033[90m{cur}\033[0m" if cur else ""
+
+                l1 = f"\033[1;37mPayer {self.payer_idx}/{self.n_payers}\033[0m · \033[1;35m{payer}\033[0m [\033[1;34mPhase:\033[0m \033[1;33m{self.cur_phase}\033[0m]{active_str}"
+                l2 = f"  \033[1;36mPages\033[0m {bar_p} | \033[1;36mQ:\033[0m {pages_q:,} \033[1;33mBlk:\033[0m {pages_blk:,} \033[1;31mFail:\033[0m {pages_fail:,} | \033[1;36m⚡ {self._pages_speed:.1f} p/s\033[0m"
+                l3 = (f"  \033[1;32mDocs \033[0m {bar_d} | \033[1;32m✓ Acc:\033[0m {acc:,} \033[90m✕ Rej:\033[0m {rej:,} "
+                      f"\033[1;33m⊘ Blk:\033[0m {blk:,} \033[1;31m⚠ Fail:\033[0m {fail:,} \033[1;36mQ:\033[0m {docs_q:,} | "
+                      f"\033[1;32m🎯 {yield_pct:.1f}%\033[0m \033[1;36m⚡ {active_docs_speed:.1f} d/s\033[0m \033[1;35m⏳ {eta_str}\033[0m")
+
+                if self._ansi_lines_drawn > 0:
+                    sys.stdout.write(f"\033[{self._ansi_lines_drawn}F")
+                out_block = f"\033[2K{self._safe_str(l1)}\n\033[2K{self._safe_str(l2)}\n\033[2K{self._safe_str(l3)}\n"
+                sys.stdout.write(out_block)
+                self._ansi_lines_drawn = 3
+                sys.stdout.flush()
+
+            elif force or (now - self._last_plain) >= PLAIN_STATUS_EVERY_SECONDS:
+                self._last_plain = now
+                p_pct = (pages_done / max(1, pages_done + pages_q)) * 100.0
+                d_pct = (docs_done / max(1, docs_done + docs_q)) * 100.0
+                msg = (f"[{datetime.now().strftime('%H:%M:%S')}] Payer {self.payer_idx}/{self.n_payers} ({payer}) "
+                       f"[phase: {self.cur_phase}] | Pages {pages_done}/{pages_done + pages_q} [{p_pct:.0f}%] "
+                       f"(queue {pages_q}, ⚡ {self._pages_speed:.1f} p/s) | "
+                       f"Docs {docs_done}/{docs_done + docs_q} [{d_pct:.0f}%] "
+                       f"(✓ acc: {acc}, ✕ rej: {rej}, ⊘ blk: {blk}, ⚠ fail: {fail}, queue: {docs_q}) | "
+                       f"🎯 Yield: {yield_pct:.1f}% | ⚡ {active_docs_speed:.1f} d/s | ⏳ ETA: {eta_str}")
+                print(self._safe_str(msg), flush=True)
 
     def stop(self) -> None:
         if self.progress is not None:
@@ -385,4 +582,9 @@ class ProgressUI:
             except Exception:  # pragma: no cover
                 pass
             self.progress = None
+        elif sys.stdout.isatty() and self._ansi_lines_drawn > 0:
+            with self._lock:
+                sys.stdout.write("\n")
+                self._ansi_lines_drawn = 0
+                sys.stdout.flush()
 

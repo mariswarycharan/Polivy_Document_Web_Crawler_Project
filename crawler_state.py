@@ -24,10 +24,8 @@ _DB_INIT_LOCK = threading.Lock()
 # 12. LLM (Gate 3) - Ollama + Qwen2.5, ambiguous cases only, with a JSON repair parser
 # =============================================================================
 LLM_SYSTEM_PROMPT = """You classify ONE document found on a US health-insurance (payer) website.
-
 TASK
-Decide whether the document is a publicly published, provider-facing POLICY DOCUMENT. If it is, give its type and line of business.
-
+Decide whether the document is a publicly published, provider-facing POLICY DOCUMENT or CLINICAL GUIDELINE.
 DOCUMENT TYPES - document_type must be exactly one of these strings:
 - medical_policy: medical, coverage or clinical policy saying when a service, procedure, device or test is covered (medical necessity, coverage rationale, CPT/HCPCS codes).
 - pharmacy_policy: pharmacy or medical-benefit drug policy with coverage criteria for specific drugs (including step therapy and quantity-limit criteria).
@@ -44,13 +42,13 @@ NOT POLICY DOCUMENTS (is_policy_document = false):
 privacy notice, terms of use, nondiscrimination or language-assistance notice, member handbook, evidence of coverage, summary of benefits, plan brochure, flyer, news or press release, provider directory, claim form unrelated to authorization, job posting, financial report, login page, and index pages that only list links to other documents.
 
 LINE OF BUSINESS - line_of_business must be exactly one of:
-Commercial (employer / group plans), Medicare (Medicare Advantage, Part D, D-SNP), Medicaid (Medicaid, CHIP, state programs), Exchange (ACA marketplace, individual and family plans), Federal (Federal Employee Program / FEP), Multiple (the text itself names more than one), Unknown (not stated).
-Use only words in the evidence. Never infer it from the payer name. A citation of Medicare rules inside a commercial policy does not make it Medicare.
+Commercial, Medicare, Medicaid, Exchange, Federal, Multiple, Unknown.
+Use only words in the evidence. Never infer it from the payer name.
 
 RULES
 1. Use only the evidence given. Do not invent facts.
-2. The URL alone is weak evidence; the title and text are strong evidence.
-3. If the evidence is weak or contradictory, answer is_policy_document false with confidence 0.4 or lower.
+2. Payer websites use highly varied terminology. A document might be titled "Clinical Guidelines", "Coverage Criteria", "Medical Necessity", "Utilization Management", or "Prior Authorization Criteria". If the text contains clinical criteria, CPT/HCPCS codes, ICD-10 codes, or coverage rationale, it IS a policy document, even if it lacks the explicit word "Policy".
+3. Give the benefit of the doubt. If the text contains medical/clinical terminology and looks like a guideline or criteria set, answer true. Only answer false if it is clearly unrelated (e.g., provider directory, claims form, privacy notice, member handbook).
 4. confidence is your probability (0.0 to 1.0) that the whole answer is correct.
 
 OUTPUT FORMAT - FOLLOW EXACTLY
@@ -60,8 +58,7 @@ OUTPUT FORMAT - FOLLOW EXACTLY
 - is_policy_document is true or false (lowercase, no quotes). confidence is a number such as 0.85 (no quotes).
 - reason is at most 12 words on one line and must not contain double quotes, backslashes or line breaks.
 - End the reply with the closing brace }.
-Example of a valid reply:
-{"is_policy_document": true, "document_type": "medical_policy", "line_of_business": "Commercial", "confidence": 0.9, "reason": "Commercial Medical Policy with coverage rationale and CPT codes"}"""
+"""
 
 LLM_RETRY_PROMPT = ("Your previous reply was not one valid JSON object. Reply again with ONLY the JSON object, "
                     "double-quoted keys and strings, the five keys in order, a reason of at most 12 words, "
