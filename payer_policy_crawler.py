@@ -152,7 +152,9 @@ def _family_key(url: str) -> tuple[str, str]:
 
 
 def in_scope_candidate(domain: str) -> bool:
-    return domain not in THIRD_PARTY_BLOCKLIST and not domain.endswith((".gov", ".edu"))
+    if not domain or domain in THIRD_PARTY_BLOCKLIST or domain.endswith((".gov", ".edu")):
+        return False
+    return not any(domain == b or domain.endswith("." + b) for b in THIRD_PARTY_BLOCKLIST)
 
 
 class PayerCrawler:
@@ -174,6 +176,19 @@ class PayerCrawler:
         others = _brand_terms([t for p in PAYER_REGISTRY if p["payer_name"] != self.name
                                for t in [p["payer_name"], p.get("payer_alias", "")] + list(p.get("brand_terms", []))])
         self.other_brand_rx = _brand_rx([t for t in others if _strong_brand(t) and t.lower() not in own_low])
+        self.other_payer_domains: set[str] = set()
+        for p in PAYER_REGISTRY:
+            if p.get("payer_name") != self.name:
+                for u in [p.get("homepage", "")] + list(p.get("extra_start_urls", [])):
+                    if u:
+                        d = reg_domain(urlparse(u).hostname or "")
+                        if d:
+                            self.other_payer_domains.add(d)
+                for d in p.get("affiliated_domains", []):
+                    if d:
+                        rd = reg_domain(d)
+                        if rd:
+                            self.other_payer_domains.add(rd)
         self._load_state()
 
     def _load_state(self) -> None:
@@ -789,13 +804,15 @@ class PayerCrawler:
                     sc = round(sc + min(HUB_INHERIT_MAX_BONUS, 0.25 * hub_score), 2)
                     sig = sig + ["hub_inherit"]
 
-                # === Baseline score for CDN documents ===
-                if is_cdn_host(host) and url_ext(l.url) in DOC_EXTS:
-                    sc = max(sc, DOC_CANDIDATE_MIN_SCORE)
-                    sig.append("cdn_doc_baseline")
-                elif kind == "maybe_doc" and self._cdn_trusted(l.url):     # extension-less file on a CDN tenant already proven
-                    sc = max(sc, MAYBE_DOC_MIN_SCORE)
-                    sig.append("cdn_trusted_baseline")
+                # === Baseline score for CDN documents (Issue 33: gate on home-domain linking page and non-negative score) ===
+                linking_in_scope = reg_domain(urlparse(page_url).hostname or "") in self.home_domains
+                if linking_in_scope and sc >= 0:
+                    if is_cdn_host(host) and url_ext(l.url) in DOC_EXTS:
+                        sc = max(sc, DOC_CANDIDATE_MIN_SCORE)
+                        sig.append("cdn_doc_baseline")
+                    elif kind == "maybe_doc" and self._cdn_trusted(l.url):     # extension-less file on a CDN tenant already proven
+                        sc = max(sc, MAYBE_DOC_MIN_SCORE)
+                        sig.append("cdn_trusted_baseline")
                 # ==================================================
 
                 threshold = DOC_CANDIDATE_MIN_SCORE if kind == "doc" else MAYBE_DOC_MIN_SCORE
@@ -843,7 +860,11 @@ class PayerCrawler:
                                       f"Page link (kind=page) not followed: score ({sc:.2f}) is below the minimum "
                                       f"({PAGE_FOLLOW_MIN_SCORE:.2f}) for a page. Anchor text: '{clean_anchor(l.anchor)[:100]}'.",
                                       l.heading, page_ctx)
-            elif sc >= RELATED_DOMAIN_MIN_SCORE and in_scope_candidate(dom) and dom not in self.related_rejected:
+            elif (sc >= RELATED_DOMAIN_MIN_SCORE
+                  and len(self.related_domains) < 8
+                  and dom not in self.other_payer_domains
+                  and in_scope_candidate(dom)
+                  and dom not in self.related_rejected):
                 # off-domain hub strongly about policies (state plan site, document portal) -> related domain.
                 # Documents found there must still name the payer (brand check in _finalize).
                 self.related_domains.add(dom)
@@ -992,6 +1013,8 @@ class PayerCrawler:
             return "blocked", f"HTTP {r.status}: the server refuses this crawler; not bypassed", False
         if b:
             return "blocked", f"Blocked ({b}, HTTP {r.status})", False
+        if r.error == "body_exceeds_limit":
+            return "failed", f"Download exceeded file size limit ({r.error}); http_status 0", False
         if r.status == 0 or (r.error and not r.status):
             return "failed", f"Transport failure ({r.error or 'no response'}); http_status 0", False
         return "failed", f"HTTP {r.status} when fetching the linked document", False
@@ -1028,9 +1051,13 @@ class PayerCrawler:
         if ssrc == "payer footprint":
             notes.append("state inferred from payer's single-state footprint")
         conf = round(min(0.55, 0.30 + 0.03 * ls), 2)
+        row_status = int(r.status or 0)
+        # Issue 41: A row with no content_hash cannot have http_status 200 under schema validation
+        if row_status == 200:
+            row_status = 0
         row = self._row(item, title=title, dtype=dtype, lob=lob, state=state, file_type="other", policy_number="",
                         eff="", upd="", requires_auth="Y" if auth else "N", methods=[hints.get("_via", "css_selector")],
-                        conf=conf, notes=notes, document_url=document_url, http_status=int(r.status or 0),
+                        conf=conf, notes=notes, document_url=document_url, http_status=row_status,
                         content_hash="", size=0, render_mode="headless" if r.via_browser else "static",
                         fetched_at=r.fetched_at)
         if row:
@@ -1059,8 +1086,10 @@ class PayerCrawler:
             named = True
         else:
             named = len(set(hits)) >= 2 or len(hits) >= 3
-        if named and self.other_brand_rx is not None and len(self.other_brand_rx.findall(blob)) > len(hits):
-            return False
+        if named and self.other_brand_rx is not None:
+            other_hits = self.other_brand_rx.findall(blob)
+            if len(other_hits) > len(hits) or len(set(other_hits)) >= 2:
+                return False
         return named
 
     def _brand_named(self, ins: Inspection, anchor: str) -> bool:
@@ -1197,14 +1226,17 @@ class PayerCrawler:
         cdn_credit = ""
         if dom not in self.home_domains and is_cdn_host(host):
             tenant = cdn_tenant(document_url)
-            if self._cdn_trusted(document_url):
-                pass                                    # tenant already proven for this payer
+            src_page = item.get("source_page_url") or ""
+            src_dom = reg_domain(urlparse(src_page).hostname or "")
+            src_is_home = src_dom in self.home_domains
+            if self._cdn_trusted(document_url) and src_is_home:
+                pass                                    # tenant already proven AND linked directly from payer's own home domain
             elif self._brand_named(ins, anchor):
                 cdn_credit = tenant                     # counted toward trusting the tenant once the document is accepted
                 notes.append(f"hosted on CDN {tenant} (payer named in the document)")
                 penalty += 0.05
             else:
-                return reject(f"hosted on CDN {tenant}, not yet trusted for {self.name}, and does not name {self.name}")
+                return reject(f"hosted on CDN {tenant}, not yet trusted with home-domain link for {self.name}, and does not name {self.name}")
         elif dom not in self.home_domains:
             # Pass the full context to _brand_named to allow acceptance based on linking page or full document text
             if not self._brand_named(ins, anchor):
@@ -1250,7 +1282,11 @@ class PayerCrawler:
         own = " ".join([title, anchor, url_words(document_url)])
         pnum, psrc = extract_policy_number(text, title, ins.tail_text)
         if not pnum and hints.get("policy_number"):
-            pnum, psrc = clean_text(str(hints["policy_number"]), 30), "json"
+            raw_hint = clean_text(str(hints["policy_number"]), 35)
+            is_guid = bool(re.match(r"^[0-9a-fA-F-]{32,36}$", raw_hint))
+            is_pure_id = raw_hint.isdigit()
+            if raw_hint and not is_pure_id and not is_guid:
+                pnum, psrc = raw_hint, "json"
         dtype, _dsrc, reimb = classify_doc_type(own, header, body, around, pnum)
         ctx = " ".join(x for x in [around, url_words(item.get("source_page_url") or "")] if x)   # listing page heading + its URL words
         lob, lsrc = detect_lob(own, header, ctx, text.lstrip())
@@ -1299,13 +1335,13 @@ class PayerCrawler:
         if upd:                                                                       # NEW
             upd_src = "tail" if any("last_updated_date taken from the end" in n for n in dates["notes"]) else "printed"   # NEW
         if not eff and hints.get("effective_date"):
-            d, kind = parse_date(str(hints["effective_date"])[:25])
+            d, kind = parse_date(str(hints["effective_date"]).strip())
             if d:
                 eff = d
                 notes.append("effective_date from the site's document index (JSON)")
         regex_used = bool((pnum and psrc in ("labeled", "format")) or eff or upd)
         if not upd and hints.get("last_updated_date"):
-            d, _ = parse_date(str(hints["last_updated_date"])[:25])
+            d, _ = parse_date(str(hints["last_updated_date"]).strip())
             if d:
                 upd = d
                 upd_src = "index"                                                     # NEW
@@ -1370,7 +1406,7 @@ class PayerCrawler:
             self.db.put(self.name, "cdn_proven", self.cdn_proven)
             if self.cdn_proven[cdn_credit] == CDN_TRUST_MIN_DOCS:
                 log(logging.INFO, "cdn_tenant_trusted", payer=self.name, tenant=cdn_credit)
-        if SAVE_DOCUMENT_FILES and r.content:
+        if SAVE_DOCUMENT_FILES and r.content and not r.truncated:
             d = os.path.join(OUTPUT_DIR, "files", _safe(self.name))
             os.makedirs(d, exist_ok=True)
             with open(os.path.join(d, f"{r.sha256[:16]}.{file_type}"), "wb") as fh:
@@ -1955,23 +1991,45 @@ def build_rows(db: StateDB) -> tuple[list[dict], list[dict]]:
     return rows, removed
 
 
-def qa_check(rows: list[dict]) -> dict:
-    keys = [url_key(r["document_url"]) for r in rows]
-    assert len(keys) == len(set(keys)), "duplicate document_url (url_key) in output"
-    assert len({r["document_url"] for r in rows}) == len(rows), "duplicate document_url in output"
+def qa_check(rows: list[dict]) -> list[dict]:
+    # 1. Deduplicate identical document_url or url_key gracefully without crashing export (Issue 40)
+    seen_urls: set[str] = set()
+    seen_keys: set[str] = set()
+    deduped_rows: list[dict] = []
+    for r in sorted(rows, key=lambda x: float(x.get("confidence_score") or 0), reverse=True):
+        u = r.get("document_url", "")
+        k = url_key(u) if u else ""
+        if u in seen_urls or (k and k in seen_keys):
+            log(logging.WARNING, "qa_duplicate_url_removed", url=u, payer=r.get("payer_name"))
+            continue
+        seen_urls.add(u)
+        if k:
+            seen_keys.add(k)
+        deduped_rows.append(r)
+
     by_hash: dict[tuple, int] = defaultdict(int)
     by_meta: dict[tuple, int] = defaultdict(int)
-    for r in rows:
-        if r["requires_auth"] == "N" and r["content_hash_sha256"]:
+    for r in deduped_rows:
+        if r.get("requires_auth") == "N" and r.get("content_hash_sha256"):
             by_hash[(r["payer_name"], r["content_hash_sha256"])] += 1
-        by_meta[(r["payer_name"], r["document_title"].lower(), r["line_of_business"], r["state_or_region"], r["document_type"])] += 1
+        by_meta[(r["payer_name"], (r.get("document_title") or "").lower(), r.get("line_of_business"), r.get("state_or_region"), r.get("document_type"))] += 1
     hash_dupes = sum(1 for v in by_hash.values() if v > 1)
     meta_dupes = sum(v for v in by_meta.values() if v > 1)
-    for r in rows:   # re-validate every row after the merge step
-        PolicyRow(**{**r, "confidence_score": float(r["confidence_score"])})
-    res = {"rows": len(rows), "same_hash_groups": hash_dupes, "rows_sharing_title_lob_state_type": meta_dupes}
+
+    # 2. Re-validate each row individually; isolate bad rows instead of crashing the whole export
+    valid_rows: list[dict] = []
+    for r in deduped_rows:
+        try:
+            PolicyRow(**{**r, "confidence_score": float(r["confidence_score"])})
+            valid_rows.append(r)
+        except Exception as e:
+            log(logging.ERROR, "qa_row_validation_failed", url=r.get("document_url"), error=str(e)[:200])
+
+    valid_rows.sort(key=lambda r: (r["payer_name"], r["document_type"], r["document_title"].lower(), r["document_url"]))
+    res = {"rows": len(valid_rows), "same_hash_groups": hash_dupes, "rows_sharing_title_lob_state_type": meta_dupes}
     log(logging.INFO if not hash_dupes else logging.WARNING, "qa_check", **res)
-    return res
+    rows[:] = valid_rows
+    return valid_rows
 
 
 def access_verdict(found: int, pages_ok: int, blocked: int, reasons: dict, refused_hosts: list, robots_skipped: int) -> tuple[str, str]:
@@ -2211,7 +2269,7 @@ def hub_coverage(db: StateDB) -> list[dict]:
 def export(db: StateDB) -> None:
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     rows, removed = build_rows(db)
-    qa_check(rows)
+    rows = qa_check(rows)
     payers = sorted(set(db.payers()) | {r["payer_name"] for r in rows})
     summaries = [summarize(db, p, rows, removed) for p in payers]
     cov = hub_coverage(db)

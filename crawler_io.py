@@ -510,8 +510,11 @@ def links_from_json(obj: Any, base: str, out: list[Link], depth: int = 0) -> Non
                 hints["effective_date"] = str(v)
             elif re.search(r"(?:last_?)?(?:updated|modified|revised|review)", kl):
                 hints["last_updated_date"] = str(v)
-            elif re.search(r"policy_?(?:number|no|num|id|code)", kl):
-                hints["policy_number"] = str(v)
+            elif re.search(r"policy_?(?:number|no|num|code)\b", kl) and not re.search(r"policy_?id\b", kl):
+                val_s = str(v).strip()
+                is_guid = bool(re.match(r"^[0-9a-fA-F-]{32,36}$", val_s))
+                if val_s and not val_s.isdigit() and not is_guid:
+                    hints["policy_number"] = val_s
         for k, v in obj.items():
             if isinstance(v, str) and len(v) < 600 and " " not in v.strip():
                 is_url_key = bool(re.search(r"(?i)(url|href|link|path|file|uri|download|src)", k))
@@ -855,6 +858,8 @@ class Fetcher:
                     res.last_modified = http_date_to_iso(res.headers.get("last-modified", ""))
                     if aborted:
                         res.error = "body_exceeds_limit"
+                        res.status = 0
+                        res.size = total
                         return res
                     res.size = total
                     res.sha256 = h.hexdigest() if method == "GET" else ""
@@ -907,6 +912,13 @@ class Browser:
         self.renders = 0
         self.robots_check = None      # callable(url) -> bool, set by the crawler: the browser obeys robots.txt like the fetcher
         self.before_request = None    # callable(url) -> None, set by the crawler: waits for the host's politeness slot
+
+    def _polite_wait(self, url: str) -> None:
+        if self.before_request is not None and url:
+            try:
+                self.before_request(url)
+            except Exception:
+                pass
 
     def _start(self) -> bool:
         if self._ctx is not None:
@@ -984,7 +996,23 @@ class Browser:
         if not self._start():
             out.error = "browser_unavailable"
             return out
-        page = self._ctx.new_page()
+        page = None
+        try:
+            page = self._ctx.new_page()
+        except Exception:
+            # Chromium crashed or context died - restart browser once (Issue 36)
+            self.close()
+            if self._start():
+                try:
+                    page = self._ctx.new_page()
+                except Exception as e:
+                    self.renders += 1
+                    out.error = f"browser_restart_failed:{type(e).__name__}"
+                    return out
+            else:
+                self.renders += 1
+                out.error = "browser_unavailable_after_crash"
+                return out
         captured_xhr: list[tuple[str, str, str]] = []  # (url, ct, body)
         pending_responses: list = []
 
@@ -1018,6 +1046,7 @@ class Browser:
 
         seen: set = set()
         try:
+            self.renders += 1
             if self.before_request is not None:
                 self.before_request(url)
             out.fetched_at = utc_now_iso()
@@ -1048,7 +1077,6 @@ class Browser:
             except Exception:
                 pass
 
-            self.renders += 1
             out.status = resp.status if resp else 0
             try:
                 out.main_body = resp.body() if resp else b""
@@ -1224,6 +1252,7 @@ class Browser:
             try:
                 t = tabs.nth(i)
                 name = clean_text(t.inner_text(timeout=1000), 60) or f"#{i + 1}"
+                self._polite_wait(page.url)
                 t.click(timeout=1500)
                 page.wait_for_timeout(600)
                 self._add_snapshot(out, f"tab:'{name}'", page.content(), seen)
@@ -1245,6 +1274,7 @@ class Browser:
                 if cand.count() == 0 or not cand.first.is_enabled():
                     return
                 before = page.url
+                self._polite_wait(page.url)
                 cand.first.click(timeout=2000)
                 page.wait_for_timeout(1200)
                 html = page.content()
@@ -1282,6 +1312,7 @@ class Browser:
                 label = f"select[{clean_text(sel_name, 40)}]='{clean_opt}'"
                 try:
                     before_url = page.url
+                    self._polite_wait(page.url)
                     sel.select_option(value, timeout=1500)
                     page.wait_for_timeout(700)
 
@@ -1307,6 +1338,7 @@ class Browser:
                                             submit_btn = b
                                             break
                             if submit_btn:
+                                self._polite_wait(page.url)
                                 submit_btn.click(timeout=2000)
                                 page.wait_for_timeout(1000)
                         except Exception:
@@ -1333,10 +1365,43 @@ class Browser:
         if not self._start():
             res.error = "browser_unavailable"
             return res
+        page = None
         try:
             if self.before_request is not None:
                 self.before_request(url)
             res.fetched_at = utc_now_iso()
+            self.renders += 1
+
+            # Step 1: Open a real page to run JavaScript and allow WAF / bot-challenge clearance (Issue 37)
+            try:
+                page = self._ctx.new_page()
+                resp = page.goto(url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_NAV_TIMEOUT_MS)
+                page.wait_for_timeout(2000)
+                if resp is not None and resp.status < 400:
+                    try:
+                        body = resp.body()
+                        if body:
+                            res.status = res.first_status = resp.status
+                            res.final_url = normalize_url(page.url) or page.url
+                            res.headers = {k.lower(): v for k, v in resp.headers.items()}
+                            res.content_type = res.headers.get("content-type", "")
+                            res.content, res.size, res.sha256 = body, len(body), sha256_hex(body)
+                            res.last_modified = http_date_to_iso(res.headers.get("last-modified", ""))
+                            res.blocked = classify_block(resp.status, url, res.final_url, body)
+                            if not res.blocked and 0 < res.status < 400:
+                                return res
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            finally:
+                if page is not None:
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
+
+            # Step 2: Fetch via ctx.request with acquired clearance cookies
             r = self._ctx.request.get(url, timeout=PLAYWRIGHT_NAV_TIMEOUT_MS, max_redirects=10)
             body = r.body()
             res.status = res.first_status = r.status

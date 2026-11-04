@@ -30,10 +30,24 @@ if TYPE_CHECKING:
 _TLD = tldextract.TLDExtract(suffix_list_urls=())  # bundled public-suffix snapshot, no network
 
 
+_SHARED_TENANT_SUFFIXES = (
+    "sharepoint.com", "azurewebsites.net", "herokuapp.com", "my.site.com",
+    "force.com", "appspot.com", "cloudapp.net", "blob.core.windows.net"
+)
+
+
 @lru_cache(maxsize=65536)
 def reg_domain(host: str) -> str:
-    e = _TLD(host or "")
-    return f"{e.domain}.{e.suffix}".lower() if e.suffix else (host or "").lower()
+    host = (host or "").lower()
+    for sfx in _SHARED_TENANT_SUFFIXES:
+        if host == sfx or host.endswith("." + sfx):
+            parts = host.split(".")
+            sfx_parts = sfx.split(".")
+            if len(parts) > len(sfx_parts):
+                return ".".join(parts[-(len(sfx_parts) + 1):])
+            return host
+    e = _TLD(host)
+    return f"{e.domain}.{e.suffix}".lower() if e.suffix else host
 
 
 def host_has_suffix(host: str, suffixes: tuple[str, ...]) -> bool:
@@ -221,6 +235,10 @@ THIRD_PARTY_BLOCKLIST = {
     "bcbs.com", "kff.org", "healthaffairs.org", "fiercehealthcare.com", "modernhealthcare.com",
     "beckershospitalreview.com", "beckerspayer.com", "statnews.com", "ama-assn.org", "aha.org", "prnewswire.com",
     "businesswire.com", "globenewswire.com",
+    # multi-payer vendors and clearinghouses (Issue 32)
+    "evicore.com", "carelon.com", "carelonbehavioralhealth.com", "availity.com",
+    "covermymeds.com", "primetherapeutics.com", "navitus.com", "surescripts.com",
+    "changehealthcare.com", "magellanhealth.com",
 }
 
 POSITIVE_TERMS: list[tuple[str, float]] = [
@@ -605,7 +623,9 @@ STATE_NAMES = {
 USPS_CODES = set(STATE_NAMES.values())
 # codes that collide with common healthcare abbreviations (PA=prior auth, MA=Medicare Advantage, CT scan, MS ...)
 _AMBIGUOUS_CODES = {"pa", "ma", "ct", "ms", "md", "va", "de", "id", "me", "or", "hi", "ok", "co", "al", "la", "il",
-                    "ne", "mo", "in", "oh", "wa", "ga", "mt", "sc", "nd", "ri"}
+                    "ne", "mo", "in", "oh", "wa", "ga", "mt", "sc", "nd", "ri",
+                    # healthcare abbreviations that collide with USPS state codes (Issue 31)
+                    "tx", "ca", "dc", "nc", "pr", "vt", "nm", "ar", "fl", "mi", "mn", "wi", "ky", "ks", "ia", "nv", "ut", "wy", "sd"}
 _STATE_NAME_RX = re.compile(r"\b(" + "|".join(sorted((re.escape(n) for n in STATE_NAMES), key=len, reverse=True)) + r")\b")
 # state names that do not mean "this document is scoped to that state"
 _STATE_FALSE_POS = re.compile(
@@ -629,10 +649,25 @@ def _states_in_text(text: str) -> list[str]:
 
 def _states_in_url(url: str) -> list[str]:
     p = urlparse(url)
+    path = unquote(p.path).lower()
     out: list[str] = []
-    for seg in re.split(r"[/_\-.]", unquote(p.path).lower()):
-        if len(seg) == 2 and seg.upper() in USPS_CODES and seg not in _AMBIGUOUS_CODES:
-            out.append(seg.upper())
+    
+    # Check directory path segments (do not split filename hyphens to avoid medical abbreviations like hcv-tx-criteria)
+    dir_parts = [d for d in path.split("/")[:-1] if d]
+    for i, d in enumerate(dir_parts):
+        d_clean = d.strip()
+        if len(d_clean) == 2 and d_clean.upper() in USPS_CODES:
+            if d_clean in _AMBIGUOUS_CODES:
+                prev = dir_parts[i-1] if i > 0 else ""
+                if prev in ("state", "states", "region", "regions", "plan", "plans", "market", "markets", "locale"):
+                    out.append(d_clean.upper())
+            else:
+                out.append(d_clean.upper())
+        elif d_clean.startswith("state-") or d_clean.startswith("st-"):
+            code = d_clean.split("-")[1]
+            if len(code) == 2 and code.upper() in USPS_CODES:
+                out.append(code.upper())
+                
     for k, v in parse_qsl(p.query):
         if k.lower() in ("state", "st", "region") and v.upper() in USPS_CODES:
             out.append(v.upper())
@@ -727,9 +762,26 @@ _NOT_PAST = re.compile(r"(?:next|scheduled|upcoming|due|planned|future)\s*$", re
 def parse_date(s: str) -> tuple[str, str]:
     """-> (YYYY-MM-DD or '', kind) with kind 'full' | 'month_year' | ''. A month/year without a day is NOT
     turned into a date (the schema says: as printed, empty rather than inferred)."""
-    s = clean_text(re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", s or "", flags=re.I))
+    s = clean_text(re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", str(s or ""), flags=re.I))
     if not s:
         return "", ""
+    # Support ASP.NET /Date(1735689600000)/ and unix epoch timestamps (Issue 34)
+    m_epoch = re.search(r"/Date\((\d+)(?:[+-]\d+)?\)/", s)
+    if m_epoch:
+        try:
+            d = datetime.fromtimestamp(int(m_epoch.group(1)) / 1000.0, timezone.utc)
+            if 1990 <= d.year <= datetime.now().year + 2:
+                return d.strftime("%Y-%m-%d"), "full"
+        except (ValueError, OverflowError, OSError):
+            pass
+    if s.isdigit() and len(s) in (10, 13):
+        try:
+            ts = int(s) / (1000.0 if len(s) == 13 else 1.0)
+            d = datetime.fromtimestamp(ts, timezone.utc)
+            if 1990 <= d.year <= datetime.now().year + 2:
+                return d.strftime("%Y-%m-%d"), "full"
+        except (ValueError, OverflowError, OSError):
+            pass
     if re.fullmatch(rf"{_MONTH}\.?,?\s+\d{{4}}|\d{{1,2}}/\d{{4}}", s, re.I):
         return "", "month_year"
     try:
