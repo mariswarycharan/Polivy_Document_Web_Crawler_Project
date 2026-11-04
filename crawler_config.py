@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 # =============================================================================
 HOMEPAGE_URL = "https://www.centene.com"  # the payer homepage / hint host to crawl
 PAYER_NAME = ""            # "" -> looked up in PAYER_REGISTRY / payer_seed_list.csv by host
-RUN_ALL_PAYERS = True      # True -> crawl every payer in the registry (the 10 payers of the brief); --homepage URL crawls one
+RUN_ALL_PAYERS = False      # True -> crawl every payer in the registry (the 10 payers of the brief); --homepage URL crawls one
 EXTRA_START_URLS: list[str] = []   # optional extra entry points for the payer in HOMEPAGE_URL
 RESET_PAYER_STATE = False  # True -> forget the checkpoint for this payer and start over
 

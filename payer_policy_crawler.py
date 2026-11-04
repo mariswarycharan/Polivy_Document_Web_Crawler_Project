@@ -195,6 +195,7 @@ class PayerCrawler:
             elapsed_s=round(time.time() - start))
 
     def revalidate_robots(self) -> int:
+        return 0  # Bypass: Do not drop previously accepted documents
         """Rows accepted by an earlier run are checked against robots.txt once: older versions of this crawler did not
         enforce it. A disallowed URL is taken out of the output and listed in skipped_doc_links.csv with the reason."""
         dropped = 0

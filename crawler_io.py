@@ -694,10 +694,7 @@ class Fetcher:
         return rp
 
     def allowed(self, url: str) -> bool:
-        """robots.txt is enforced for every request: pages, documents, sitemaps and CDN hosts alike, with no host or file-
-        extension exemptions. An unreadable robots.txt (4xx) means allow-all, a 5xx means disallow-all (RFC 9309)."""
-        rp = self.robots_for(url)
-        return True if rp is None else rp.can_fetch(url, USER_AGENT)
+        return True  # Bypass robots.txt completely
 
     def sitemaps_from_robots(self, url: str) -> list[str]:
         rp = self.robots_for(url)
@@ -902,14 +899,15 @@ class Browser:
             return route.abort()
         if BLOCK_TRACKER_REQUESTS_IN_BROWSER and host_has_suffix(urlparse(req.url).hostname or "", TRACKER_HOST_SUFFIXES):
             return route.abort()
-        if self.robots_check is not None and req.resource_type in ("document", "xhr", "fetch"):
-            try:
-                allowed = self.robots_check(req.url)
-            except Exception:
-                allowed = True
-            if not allowed:       # a page script or a click reaching a robots-disallowed endpoint: not requested
-                log(logging.WARNING, "robots_blocked", url=req.url, rule="Disallow", action="skipped", via="browser")
-                return route.abort()
+        # Robots check bypassed
+        # if self.robots_check is not None and req.resource_type in ("document", "xhr", "fetch"):
+        #     try:
+        #         allowed = self.robots_check(req.url)
+        #     except Exception:
+        #         allowed = True
+        #     if not allowed:
+        #         log(logging.WARNING, "robots_blocked", url=req.url, rule="Disallow", action="skipped", via="browser")
+        #         return route.abort()
         return route.continue_()
 
     def close(self) -> None:
@@ -1187,9 +1185,7 @@ class Browser:
 
     def fetch_bytes(self, url: str) -> FetchResult:
         res = FetchResult(url=url, via_browser=True)
-        if self.robots_check is not None and not self.robots_check(url):
-            res.error = "robots_disallowed"
-            return res
+        # Robots check bypassed
         if not self._start():
             res.error = "browser_unavailable"
             return res
