@@ -151,6 +151,14 @@ _SQUASHED_STEMS = [
     ("clinicalguideline", "clinical guideline"), ("medicalnecessity", "medical necessity guidelines"),
     ("clinicalcriteria", "clinical criteria"), ("coverageguideline", "coverage guideline"),
     ("providermanual", "provider manual"), ("policybulletin", "policy bulletin"), ("policyupdate", "policy update"),
+    # --- abbreviated URL path stems (Anthem /dam/medpolicies/, /rxpolicies/, etc.) ---
+    ("medpolicies", "medical policies"), ("medpolic", "medical policy"),
+    ("clinpolicies", "clinical policies"), ("clinpolic", "clinical policy"),
+    ("rxpolicies", "drug policies"), ("rxpolic", "drug policy"), ("rxpol", "drug policy"),
+    ("pharmpolicies", "pharmacy policies"), ("pharmpolic", "pharmacy policy"),
+    ("cpbulletin", "clinical policy bulletin"),
+    # --- line-of-business abbreviations in URL path segments ---
+    ("mapd", "medicare advantage"),
 ]
 
 
@@ -263,11 +271,11 @@ NEGATIVE_TERMS: list[tuple[str, float]] = [
     (r"cookies?", -10), (r"non-?discrimination|language assistance|taglines?|accessibility", -6),
     (r"careers?|\bjobs?\b|job openings", -10), (r"investors?|shareholders?|annual report|sec filings|\besg\b|sustainability", -10),
     (r"press releases?|newsroom|media (?:center|room)|news releases?", -6), (r"\bnews\b", -2), (r"\bblogs?\b|\barticles?\b", -4),
-    (r"\bevents?\b|webinars?", -3), (r"log ?in|sign ?in|sign ?up|register|my account|forgot password|reset password", -6),
+    (r"\bevents?\b(?!\s+(?:monitors?|reports?|reviews?|logs?|notifications?))|webinars?", -3), (r"\blog[\s-]?in\b|\bsign[\s-]?(?:in|up)\b|\bregister\b|my account|forgot password|reset password", -6),
     (r"member handbook|evidence of coverage|summary of benefits|\bsbc\b|annual notice of change|benefit summary|plan overview", -5),
-    (r"brochures?|flyers?|postcards?|infographics?", -5), (r"newsletters?", -3), (r"foundation|donat(?:e|ion)", -6),
+    (r"brochures?|flyers?|postcards?|infographics?", -5), (r"newsletters?", -3), (r"\bfoundation\b(?!\s*one\b)|(?<!\w)(?<!organ )donat(?:e|ion)", -6),
     (r"find a (?:doctor|provider|pharmacy|dentist)|provider directory|find care|doctor finder", -5),
-    (r"contact us|about us|leadership|board of directors|our story|mission", -5),
+    (r"contact us|about us|leadership|board of directors|our story|\bmission\b", -5),
     (r"transparency in coverage|machine[\s-]readable|\bmrf\b|price transparency", -6),
     (r"facebook|twitter|linkedin|instagram|youtube", -10), (r"\bsitemap\b", -2), (r"\bespa[nñ]ol\b|\bspanish\b", -0.5),
     (r"shop (?:for )?plans?|get a quote|enroll now|buy now", -5),
@@ -345,7 +353,7 @@ def score_link(url: str, anchor: str = "", heading: str = "", parent: str = "", 
         if not is_page:      # see DOC_ONLY_NEGATIVE_TERMS
             nd, ndh = _mt(text, "negdoc")
             neg, nh = neg + nd, nh + ndh
-        if neg < 0 and pos <= 2:   # "policy" alone is a trap ("privacy policy")
+        if neg < 0 and pos <= 1:   # "policy" alone is a trap ("privacy policy"); \bpolicies\b (+2) survives
             pos = 0
         total = pos + neg
         if is_page:
@@ -437,10 +445,16 @@ def link_kind(url: str) -> str:
         return "doc"
     if ext == "xml":
         return "sitemap" if "sitemap" in low else "junk"
-    if ext in PAGE_EXTS:
-        return "page"
+    # BUG FIX 4: Check MAYBE_DOC_HINTS BEFORE PAGE_EXTS.
+    # Links like ViewDocument.aspx?docid=55 or GetFile.php?id=123 have a page extension
+    # but are actually document-retrieval handlers. The old order classified them as "page",
+    # subjecting them to strict depth/domain rules and causing the real documents to be missed.
+    # By checking MAYBE_DOC_HINTS first, these handlers are correctly classified as "maybe_doc"
+    # and treated as potential documents regardless of their file extension.
     if any(h in low for h in MAYBE_DOC_HINTS):
         return "maybe_doc"
+    if ext in PAGE_EXTS:
+        return "page"
     return "page"
 
 
@@ -534,10 +548,12 @@ LOB_RULES: dict[str, list[str]] = {
     "Federal": [r"federal employee program", r"\bfep\b", r"\bfehbp?\b", r"\btricare\b", r"federal employees? health benefits?"],
     "Medicare": [r"medicare advantage", r"\bmedicare\b(?!\s+(?:coverage database|national coverage|local coverage|"
                  r"coverage determination|\(?ncd|\(?lcd|benefit policy manual|claims processing|program integrity))",
-                 r"\bpart d\b", r"\bmapd\b", r"\bpdp\b", r"\bd-?snp\b", r"dual (?:eligible|special needs|complete)", r"\bmedigap\b"],
+                 r"\bpart d\b", r"\bmapd\b", r"\bpdp\b", r"\bd-?snp\b", r"dual (?:eligible|special needs|complete)", r"\bmedigap\b",
+                 r"\bmcr\b"],           # URL-path abbreviation: /mcr/policies
     "Medicaid": [r"\bmedicaid\b", r"\bchip\b", r"community plan", r"familycare", r"healthchoices", r"tenncare", r"medi-cal",
                  r"star ?(?:\+|plus|kids)\b", r"badgercare", r"masshealth", r"healthy michigan", r"medical assistance",
-                 r"\bmltss\b", r"\bltss\b", r"managed long[\s-]term"],
+                 r"\bmltss\b", r"\bltss\b", r"managed long[\s-]term",
+                 r"\bmcd\b"],           # URL-path abbreviation: /mcd/policies
     "Exchange": [r"marketplace", r"health insurance exchange", r"\bexchange plans?\b", r"\bon[\s-]exchange\b",
                  r"individual (?:and|&) family (?:plans?|products?)", r"\bifp\b", r"affordable care act", r"\baca\b", r"\bambetter\b"],
     "Commercial": [r"\bcommercial\b", r"\bemployer\b", r"group (?:plans?|health)", r"fully[\s-]insured", r"self[\s-]funded",

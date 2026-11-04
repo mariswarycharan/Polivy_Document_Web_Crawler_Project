@@ -637,7 +637,10 @@ class PayerCrawler:
         hub_score = float(item["link_score"] or 0)
         if page_ctx:
             hub_score = max(hub_score, score_link("", anchor=page_ctx, is_page=True)[0])
-        page_is_hub = int(item["depth"]) > 0 and hub_score >= HUB_INHERIT_MIN_SCORE
+        # BUG FIX 1: Start pages (depth=0) were previously excluded from passing their hub bonus
+        # to linked documents. A depth-0 page can itself be a massive policy library (e.g., a direct
+        # start URL for a payer's medical-policy index), so it must be allowed to act as a hub.
+        page_is_hub = hub_score >= HUB_INHERIT_MIN_SCORE
         families: dict[tuple[str, str], int] = defaultdict(int)
         if page_is_hub:
             for l in links:
@@ -692,6 +695,14 @@ class PayerCrawler:
                 if page_is_hub and sc >= 0:      # documents listed on a policy hub inherit part of its evidence
                     sc = round(sc + min(HUB_INHERIT_MAX_BONUS, 0.25 * hub_score), 2)
                     sig = sig + ["hub_inherit"]
+
+            # BUG FIX 2: HTML policy pages (kind=="page") listed on a hub now also receive the hub
+            # bonus. Previously only "doc"/"maybe_doc" kinds were boosted. Payers that publish
+            # policies as HTML pages (not PDFs) were systematically under-scored and missed because
+            # their HTML links got no hub_inherit boost, causing them to fail the page-follow threshold.
+            elif kind == "page" and page_is_hub and in_scope and sc >= 0:
+                sc = round(sc + min(HUB_INHERIT_MAX_BONUS, 0.25 * hub_score), 2)
+                sig = sig + ["hub_inherit_html"]
 
                 # === Baseline score for CDN documents ===
                 # CDNs often have generic anchors (e.g., "Download") and opaque URLs. 
@@ -821,11 +832,44 @@ class PayerCrawler:
             # a "document" link that serves HTML: viewer page, landing page or an HTML policy page
             html = r.content.decode(_charset(r.content_type) or "utf-8", "ignore")
             links, ctx = extract_links(html, r.final_url or url)
-            self._enqueue_links(item, links, ctx, r.final_url or url, extra_step="")
             is_doc, cscore, csig = html_policy_evidence(ins)
             if not is_doc:
+                # BUG FIX 3: Extension-less listing pages (maybe_doc) previously became dead ends.
+                # When a URL matched MAYBE_DOC_HINTS (e.g. /documents/, /files/) but served HTML,
+                # _enqueue_doc set budget=0, so any links found inside were immediately dropped.
+                # Fix: enqueue its links using the item's ORIGINAL budget (minus 1 depth level),
+                # treating the page as a normal listing page so its child links are followed.
+                orig_budget = (int(item["budget"]) if item["budget"] is not None else 0)
+                if orig_budget > 0 or item["kind"] != "maybe_doc":
+                    self._enqueue_links(item, links, ctx, r.final_url or url, extra_step="")
+                else:
+                    # Restore a minimal exploration budget for this HTML listing page.
+                    # _enqueue_doc always writes budget=0; give it back for the HTML case.
+                    page_item = dict(item)
+                    page_item["budget"] = int(item["depth"] or 0) + 1  # at least 1 level to follow links
+                    self._enqueue_links(page_item, links, ctx, r.final_url or url, extra_step="")
                 self.db.finish(self.name, key, "rejected", "html_landing_or_index_page")
                 return
+            # BUG FIX 5: Viewer-page → embedded-file evidence chain.
+            # When a doc/maybe_doc link fetches HTML (a viewer page embedding the real file),
+            # the embedded file links are scored from scratch and lose the strong link evidence
+            # the original link carried. Fix: elevate the page_ctx with the original item's
+            # link_score so that embedded files benefit from the viewer page's hub status.
+            # We do this by temporarily inflating the item's link_score so _enqueue_links
+            # will treat the viewer as a hub and apply hub_inherit to embedded doc links.
+            viewer_item = dict(item)
+            orig_ls = float(item.get("link_score") or 0)
+            if orig_ls >= HUB_INHERIT_MIN_SCORE:
+                # Viewer page already qualifies as a hub based on its own link score — pass it through.
+                self._enqueue_links(viewer_item, links, ctx, r.final_url or url, extra_step="")
+            else:
+                # Viewer page does not qualify as a hub on its own, but its strong parent link score
+                # proves the embedded content is relevant. Temporarily promote the link_score so the
+                # embedded file links inherit the evidence. The viewer's link_score IS the
+                # quality signal for whatever it embeds.
+                viewer_item["link_score"] = max(orig_ls, HUB_INHERIT_MIN_SCORE)
+                self._enqueue_links(viewer_item, links, ctx, r.final_url or url, extra_step=" > viewer")
+
         self._finalize(item, r, ins, cscore, csig)
 
     def _note_for_failure(self, r: FetchResult) -> tuple[str, str, bool]:
