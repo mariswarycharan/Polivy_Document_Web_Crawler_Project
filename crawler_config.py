@@ -197,12 +197,12 @@ MAX_RENDERS_PER_PAYER = 400       # headless renders per payer (RAM/time guard)
 
 USE_LLM = True
 OLLAMA_URL = "http://localhost:11434"
-OLLAMA_MODEL = "qwen2.5:3b"       # Qwen2.5 3B instruct (CPU, ~2 GB RAM in Q4)
+OLLAMA_MODEL = "phi3.5:3.8b"       # Qwen2.5 3B instruct (CPU, ~2 GB RAM in Q4)
 LLM_TIMEOUT_SECONDS = 180         # first call also loads the model
 LLM_NUM_PREDICT = 400             # enough room that the JSON object is never cut off
 LLM_NUM_CTX = 4096
 LLM_MAX_ATTEMPTS = 3              # schema-constrained -> JSON mode -> free text with a correction message
-MAX_LLM_CALLS_PER_PAYER = 600
+MAX_LLM_CALLS_PER_PAYER = 100000000
 LLM_FOR_MISSING_FIELDS = True     # also ask the LLM when document type / line of business stay unknown
 
 USE_OCR = True                    # Tesseract OCR for scanned PDFs (only if pytesseract is installed)

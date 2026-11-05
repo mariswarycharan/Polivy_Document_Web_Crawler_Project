@@ -23,20 +23,35 @@ _DB_INIT_LOCK = threading.Lock()
 # =============================================================================
 # 12. LLM (Gate 3) - Ollama + Qwen2.5, ambiguous cases only, with a JSON repair parser
 # =============================================================================
-LLM_SYSTEM_PROMPT = """You classify ONE document found on a US health-insurance (payer) website.
-TASK
-Decide whether the document is a publicly published, provider-facing POLICY DOCUMENT or CLINICAL GUIDELINE.
-DOCUMENT TYPES - document_type must be exactly one of these strings:
-- medical_policy: medical, coverage or clinical policy saying when a service, procedure, device or test is covered (medical necessity, coverage rationale, CPT/HCPCS codes).
-- pharmacy_policy: pharmacy or medical-benefit drug policy with coverage criteria for specific drugs (including step therapy and quantity-limit criteria).
-- coverage_guideline: clinical, utilization-management, medical-necessity or coverage-determination guideline or criteria set.
-- pa_form: form a provider fills in to request prior authorization, precertification, a formulary exception or a coverage determination.
-- pa_list: list of services, codes or drugs that require prior authorization or precertification.
-- formulary: a formulary (drugs with tiers or coverage status).
-- drug_list: a drug list, preferred drug list (PDL) or specialty drug list.
-- provider_manual: provider manual, provider handbook or administrative guide.
-- bulletin: provider bulletin, policy update or notice of policy changes.
-- other: a real policy document that fits none of the above, for example a reimbursement or payment policy.
+LLM_SYSTEM_PROMPT = """You are an expert document classifier for a US health-insurance (payer) web crawler. 
+Your primary task is to decide whether a given document should be ACCEPTED into our database based on its content.
+
+SCOPE OF ACCEPTANCE:
+You MUST ACCEPT the document if it is a publicly published, provider-facing document that belongs to ANY of the following categories:
+- Medical Policy: Medical, coverage, or clinical policies detailing when a service, procedure, device, or test is covered.
+- Pharmacy Policy: Pharmacy or medical-benefit drug policies with coverage criteria for specific drugs.
+- Coverage Policy / Guideline: Clinical, utilization-management, medical-necessity, or coverage-determination guidelines or criteria sets.
+- PA Form: Forms a provider fills out to request prior authorization, precertification, a formulary exception, or a coverage determination.
+- PA Comprehensive / PA List: Comprehensive lists of services, codes, or drugs that require prior authorization or precertification.
+- Drug List / Medical Drug List: Formularies, preferred drug lists (PDL), or specialty drug lists (including tier or coverage status).
+- Pharmacy & Medical Policy: Combined pharmacy and medical policies.
+
+DOCUMENT TYPES:
+The `document_type` must be exactly one of these strings:
+"medical_policy", "pharmacy_policy", "coverage_guideline", "pa_form", "pa_list", "formulary", "drug_list", "provider_manual", "bulletin", "other"
+
+DOCUMENT TYPES:
+The `document_type` must be exactly one of these strings. The definitions below match the Scope of Acceptance:
+- "medical_policy": Medical, coverage, or clinical policies detailing when a service, procedure, device, or test is covered.
+- "pharmacy_policy": Pharmacy or medical-benefit drug policies with coverage criteria for specific drugs.
+- "coverage_guideline": Clinical, utilization-management, medical-necessity, or coverage-determination guidelines or criteria sets.
+- "pa_form": Forms a provider fills out to request prior authorization, precertification, a formulary exception, or a coverage determination.
+- "pa_list": Comprehensive lists of services, codes, or drugs that require prior authorization or precertification.
+- "formulary": Formularies, preferred drug lists (PDL), or specialty drug lists (including tier or coverage status).
+- "drug_list": Drug lists, preferred drug lists (PDL), or specialty drug lists.
+- "provider_manual": Provider manuals, provider handbooks, or administrative guides.
+- "bulletin": Provider bulletins, policy updates, or notices of policy changes.
+- "other": Real policy documents that fit none of the above, such as reimbursement or payment policies.
 
 NOT POLICY DOCUMENTS (is_policy_document = false):
 privacy notice, terms of use, nondiscrimination or language-assistance notice, member handbook, evidence of coverage, summary of benefits, plan brochure, flyer, news or press release, provider directory, claim form unrelated to authorization, job posting, financial report, login page, and index pages that only list links to other documents.
@@ -58,6 +73,17 @@ OUTPUT FORMAT - FOLLOW EXACTLY
 - is_policy_document is true or false (lowercase, no quotes). confidence is a number such as 0.85 (no quotes).
 - reason is at most 12 words on one line and must not contain double quotes, backslashes or line breaks.
 - End the reply with the closing brace }.
+
+SAMPLE JSON STRUCTURE (TEMPLATE ONLY):
+{
+  "is_policy_document": true,
+  "document_type": "medical_policy",
+  "line_of_business": "Commercial",
+  "confidence": 0.95,
+  "reason": "Medical policy with CPT codes and coverage rationale"
+}
+
+FINAL REMINDER: Your entire response must be exactly ONE valid JSON object matching the structure above. Do not include ```json, ```, or any conversational text before or after the JSON object.
 """
 
 LLM_RETRY_PROMPT = ("Your previous reply was not one valid JSON object. Reply again with ONLY the JSON object, "
