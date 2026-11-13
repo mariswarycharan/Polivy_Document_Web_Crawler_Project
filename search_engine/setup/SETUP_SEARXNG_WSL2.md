@@ -44,8 +44,13 @@ sed -i 's/\r$//' ~/start_searxng.sh && chmod +x ~/start_searxng.sh
 
 ## 4. Start SearXNG (each time you need it)
 
-```bash
+From a **Windows PowerShell** window:
+```powershell
 wsl -d Debian -- ~/start_searxng.sh
+```
+Or, if you are **already inside Debian** (the prompt shows `user@PC:~$`), just:
+```bash
+~/start_searxng.sh
 ```
 Leave that window open. Check it in a browser: <http://127.0.0.1:8888>.
 
