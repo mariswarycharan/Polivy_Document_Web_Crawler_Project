@@ -1,0 +1,4 @@
+# Extra packages for the search-engine module (the crawler's own requirements.txt is unchanged)
+httpx>=0.27
+cdx_toolkit>=0.9.39
+openpyxl>=3.1

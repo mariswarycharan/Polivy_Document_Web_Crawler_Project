@@ -84,12 +84,19 @@ upstream engines (DuckDuckGo, Brave, Mojeek, Google, Bing ...), then merges the 
 - **Outputs:** the search engine writes its own files (`search_links.xlsx`, `search_gap_analysis.xlsx`, and a
   final verified-links file). They are compared with the crawler output so repeated links are removed, but
   they are **never merged** into the crawler's `output.csv`.
-
 - **Both sources are used:** SearXNG (the search engine agreed by the team) for keyword discovery, plus the
   Common Crawl / Internet Archive indexes for domain-wide discovery.
 - **SearXNG setup is kept light** because disk space is limited: WSL2 with a minimal Debian placed on the
   E: drive, no Docker Desktop. Rough footprint 0.5-1.5 GB; nothing runs in the background unless started.
 
-## Open questions
-1. Which upstream engines are acceptable (DuckDuckGo, Brave, Mojeek, Qwant ...)? Google and Bing do not
-   allow automated querying.
+- **Search engine used by SearXNG: DuckDuckGo only**, at a low rate (one request every 6 s). Checked 13 Nov 2026:
+  DuckDuckGo's terms and acceptable-use policy do not forbid automated queries or keeping results (they forbid
+  disrupting the service and reselling it). Excluded: **Mojeek** (terms forbid automated use and scraping without
+  its API), **Brave** (SearXNG reads Brave's web pages, which its licence does not cover; the official API's terms
+  forbid storing results and need a credit card), **Google / Bing** (no automated querying).
+
+## Phase status
+- **Phase 1 - in progress.** Code in place: `config.py`, `payers.py` (reads the crawler's payer registry),
+  `query_builder.py`, `searxng_client.py`, `archive_client.py`, command line (`python -m search_engine
+  check | queries | sample`), SearXNG settings and WSL2 setup guide in `setup/`, offline tests in `tests/`.
+  Remaining: install SearXNG in WSL2 and run `python -m search_engine check` on the team machine.

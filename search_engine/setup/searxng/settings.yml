@@ -1,0 +1,26 @@
+# SearXNG settings for the payer-policy search engine (local use only).
+# Starts from SearXNG's default settings and overrides only what this project needs.
+use_default_settings:
+  engines:
+    keep_only:
+      - duckduckgo          # the only engine used (see search_engine/PLAN.md for why)
+
+general:
+  instance_name: "payer-policy-search"
+  debug: false
+
+search:
+  safe_search: 0
+  formats:
+    - html
+    - json                  # the Python client reads JSON; SearXNG refuses it (403) unless listed here
+
+server:
+  bind_address: "127.0.0.1" # reachable from Windows as http://127.0.0.1:8888 through WSL2 localhost forwarding
+  port: 8888
+  secret_key: "CHANGE_ME_TO_A_RANDOM_KEY"   # replaced by the setup steps with a random value
+  limiter: false            # the bot limiter would block our own scripted requests
+  image_proxy: false
+
+outgoing:
+  request_timeout: 6.0
