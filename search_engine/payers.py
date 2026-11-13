@@ -10,6 +10,7 @@ class Payer:
     hint_host: str
     domains: tuple[str, ...]                 # hint host first, then affiliated domains, no duplicates
     brand_terms: tuple[str, ...] = field(default=())
+    alias: str = ""
 
 
 def _clean_domain(d: str) -> str:
@@ -32,7 +33,7 @@ def from_registry(registry: list[dict]) -> list[Payer]:
                 seen.add(d)
                 ordered.append(d)
         out.append(Payer(name=p["payer_name"], hint_host=hint, domains=tuple(ordered),
-                         brand_terms=tuple(p.get("brand_terms", []))))
+                         brand_terms=tuple(p.get("brand_terms", [])), alias=p.get("payer_alias", "") or p["payer_name"]))
     return out
 
 

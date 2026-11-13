@@ -105,3 +105,13 @@ upstream engines (DuckDuckGo, Brave, Mojeek, Google, Bing ...), then merges the 
     connection error, and the next run continues where it stopped (`output/searxng_progress_<payer>.json`);
   - links stored per payer in `output/links_<payer>.jsonl`, one row per crawler `url_key`, all sources listed;
   - `output/search_links.xlsx` rebuilt after every run: sheet `links` and sheet `summary`.
+- **Phase 3 - built (14 Nov 2026).**
+  - `python -m search_engine compare --all` (no network): reads the crawler's `output/output.csv` and its checkpoint
+    database, and splits every search link into **found by both**, **seen by crawler but not output** (with the
+    crawler's status and reason), and **search only** (with why the crawler missed it: host never crawled, crawl not
+    finished, or not linked from any visited page).
+  - `python -m search_engine verify --payer <name> [--max N]`: fetches each search-only link with the crawler's own
+    fetcher and judges it with the crawler's own rules -> accepted / rejected / ambiguous / unreachable. Results are
+    kept in `output/verified_<payer>.jsonl`, so runs can be split and resumed.
+  - Outputs: `output/search_gap_analysis.xlsx` (summary, new_policy_documents, search_only_other, seen_by_crawler,
+    found_by_both) and the final result `output/search_engine_results.xlsx` (verified new policy documents only).

@@ -6,6 +6,8 @@
     python -m search_engine collect --payer Centene   # Phase 2: archive indexes + next SearXNG batch -> search_links.xlsx
     python -m search_engine collect --all             # every payer in the crawler's registry
     python -m search_engine export                    # rebuild search_links.xlsx from what is already collected
+    python -m search_engine compare --all             # Phase 3: compare with the crawler output (no network)
+    python -m search_engine verify --payer Centene    # Phase 3: check the search-only links, then re-run compare
 """
 from __future__ import annotations
 
@@ -144,6 +146,54 @@ def cmd_export(args) -> int:
     return 0
 
 
+def _payers_with_links(args):
+    from .store import LinkStore
+    payers = load_payers() if args.all else [find_payer(load_payers(), args.payer)]
+    return [(p, list(LinkStore(p.name).rows.values())) for p in payers]
+
+
+def _write_gap(pairs) -> None:
+    from .compare import compare, load_crawler_view
+    from .gap_export import export
+    from .verify import VerifyStore
+    comps, verified = [], {}
+    for payer, links in pairs:
+        if not links:
+            continue
+        c = compare(payer.name, links, load_crawler_view(payer.name))
+        comps.append(c)
+        verified[payer.name] = VerifyStore(payer.name).rows
+        crawler_note = "" if c.view.available else "  (no crawler output for this payer yet)"
+        print(f"{payer.name}: {len(links)} search links | crawler documents {len(c.view.accepted)} | "
+              f"both {len(c.found_by_both)} ({c.overlap_pct}% of crawler docs) | seen by crawler "
+              f"{len(c.seen_by_crawler)} | search only {len(c.search_only)}{crawler_note}")
+    gap, final = export(comps, verified)
+    print(f"Excel: {gap}\nExcel: {final}")
+
+
+def cmd_compare(args) -> int:
+    _write_gap(_payers_with_links(args))
+    return 0
+
+
+def cmd_verify(args) -> int:
+    from .compare import compare, load_crawler_view
+    from .verify import VerifyStore, verify_links
+    pairs = _payers_with_links(args)
+    for payer, links in pairs:
+        if not links:
+            print(f"{payer.name}: no search links collected yet")
+            continue
+        c = compare(payer.name, links, load_crawler_view(payer.name))
+        store = VerifyStore(payer.name)
+        left = sum(1 for r in c.search_only if r["url_key"] not in store.rows)
+        print(f"== {payer.name}: {len(c.search_only)} search-only link(s), {left} not yet verified")
+        n = verify_links(c.search_only, payer.alias or payer.name, store, max_links=args.max)
+        print(f"   checked {n} in this run")
+    _write_gap(pairs)
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="python -m search_engine", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -165,9 +215,17 @@ def main(argv=None) -> int:
     co.add_argument("--max-queries", type=int, default=SEARXNG_BATCH_QUERIES,
                     help="SearXNG queries in this run (the next run continues)")
     sub.add_parser("export", help="rebuild search_links.xlsx from the stored links")
+    for name, helptext in (("compare", "Phase 3: compare search links with the crawler output (no network)"),
+                           ("verify", "Phase 3: fetch and check the search-only links, then write the gap files")):
+        p = sub.add_parser(name, help=helptext)
+        g2 = p.add_mutually_exclusive_group(required=True)
+        g2.add_argument("--payer")
+        g2.add_argument("--all", action="store_true")
+        if name == "verify":
+            p.add_argument("--max", type=int, default=None, help="check at most this many links per payer in this run")
     args = ap.parse_args(argv)
-    return {"check": cmd_check, "queries": cmd_queries, "sample": cmd_sample,
-            "collect": cmd_collect, "export": cmd_export}[args.cmd](args)
+    return {"check": cmd_check, "queries": cmd_queries, "sample": cmd_sample, "collect": cmd_collect,
+            "export": cmd_export, "compare": cmd_compare, "verify": cmd_verify}[args.cmd](args)
 
 
 if __name__ == "__main__":
