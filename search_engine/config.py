@@ -15,6 +15,7 @@ SEARXNG_ENGINES = ["duckduckgo"]
 SEARXNG_DELAY_SECONDS = 6.0      # pause between two SearXNG requests (keeps the upstream engine from suspending us)
 SEARXNG_TIMEOUT_SECONDS = 30.0
 SEARXNG_MAX_PAGES = 3            # result pages fetched per query (about 10 results each)
+SEARXNG_BATCH_QUERIES = 15       # queries per run; the next run continues where this one stopped
 
 # Policy terms combined with every payer domain to build keyword queries.
 POLICY_TERMS = [
@@ -33,7 +34,8 @@ FILE_TYPES = ["pdf"]             # an extra query with filetype:<x> is built for
 
 # --------------------------------------------------------------------------- web-archive URL indexes
 ARCHIVE_SOURCES = ["cc", "ia"]   # cc = Common Crawl, ia = Internet Archive (Wayback Machine)
-ARCHIVE_LIMIT_PER_DOMAIN = 5000  # captures read per domain and source
+ARCHIVE_LIMIT_PER_DOMAIN = 5000  # captures read per domain, source and pass (documents / policy pages)
+ARCHIVE_FROM = ""                # e.g. "2023" to read Common Crawl indexes from 2023 on; "" = the last 12 months
 DOCUMENT_MIME_TYPES = (
     "application/pdf",
     "application/msword",

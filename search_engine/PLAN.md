@@ -96,7 +96,12 @@ upstream engines (DuckDuckGo, Brave, Mojeek, Google, Bing ...), then merges the 
   forbid storing results and need a credit card), **Google / Bing** (no automated querying).
 
 ## Phase status
-- **Phase 1 - in progress.** Code in place: `config.py`, `payers.py` (reads the crawler's payer registry),
-  `query_builder.py`, `searxng_client.py`, `archive_client.py`, command line (`python -m search_engine
-  check | queries | sample`), SearXNG settings and WSL2 setup guide in `setup/`, offline tests in `tests/`.
-  Remaining: install SearXNG in WSL2 and run `python -m search_engine check` on the team machine.
+- **Phase 1 - done (13 Nov 2026).** SearXNG installed in WSL2 on the team machine; `python -m search_engine check`
+  answered. Common Crawl and the Internet Archive are reachable. DuckDuckGo answered the first query with a
+  CAPTCHA, and SearXNG then pauses it for 24 h; the CAPTCHA is respected, never bypassed.
+- **Phase 2 - built, waiting for a first real run.** `python -m search_engine collect --payer <name>` (or `--all`):
+  - archive indexes: two filtered passes per domain and source (documents; policy-looking web pages);
+  - SearXNG: the next batch of queries (15 by default); the batch stops at the first CAPTCHA, suspension or
+    connection error, and the next run continues where it stopped (`output/searxng_progress_<payer>.json`);
+  - links stored per payer in `output/links_<payer>.jsonl`, one row per crawler `url_key`, all sources listed;
+  - `output/search_links.xlsx` rebuilt after every run: sheet `links` and sheet `summary`.

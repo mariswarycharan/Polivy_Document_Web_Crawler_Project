@@ -80,13 +80,21 @@ def test_archive_candidate_filter(url, mime, keep):
     assert archive_client.is_candidate(url, mime) is keep
 
 
-def test_archive_listing_uses_subdomain_pattern_and_status_filter():
-    seen = {}
+def test_archive_listing_runs_a_document_pass_and_a_page_pass():
+    calls = []
     class FakeFetcher:
         def iter(self, pattern, limit, filter):
-            seen.update(pattern=pattern, filter=filter)
+            calls.append((pattern, filter))
             yield {"url": "https://www.x.com/p/a.pdf", "mime": "application/pdf", "status": "200", "timestamp": "20260101000000"}
             yield {"url": "https://www.x.com/contact", "mime": "text/html", "status": "200", "timestamp": "20260101000000"}
     hits = list(archive_client.list_domain("x.com", "cc", limit=10, fetcher=FakeFetcher()))
-    assert seen == {"pattern": "*.x.com", "filter": ["=status:200"]}
-    assert [h.url for h in hits] == ["https://www.x.com/p/a.pdf"] and hits[0].source == "commoncrawl"
+    assert [c[0] for c in calls] == ["*.x.com", "*.x.com"]
+    assert calls[0][1][0] == "=status:200" and calls[0][1][1].startswith("~mime:application/")
+    assert calls[1][1][1] == "=mime:text/html" and calls[1][1][2].startswith("~url:")
+    assert [(h.url, h.kind) for h in hits] == [("https://www.x.com/p/a.pdf", "docs"), ("https://www.x.com/p/a.pdf", "pages")]
+    assert hits[0].source == "commoncrawl"
+
+
+def test_internet_archive_filters_use_no_modifiers():
+    for kind in ("docs", "pages"):
+        assert all(not f.startswith(("=", "~", "!")) for f in archive_client.server_filters("ia", kind))
