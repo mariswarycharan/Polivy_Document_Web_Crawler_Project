@@ -115,3 +115,7 @@ upstream engines (DuckDuckGo, Brave, Mojeek, Google, Bing ...), then merges the 
     kept in `output/verified_<payer>.jsonl`, so runs can be split and resumed.
   - Outputs: `output/search_gap_analysis.xlsx` (summary, new_policy_documents, search_only_other, seen_by_crawler,
     found_by_both) and the final result `output/search_engine_results.xlsx` (verified new policy documents only).
+- **Phase 4 - built (14 Nov 2026).** `python -m search_engine run --payer <name> | --all` runs the whole flow:
+  optional crawler run (`--crawl`, the crawler is started unchanged as its own process), collection (archive, plus
+  `--searxng` for a keyword batch), verification (`--verify-max`, default 200 per payer) and all Excel files.
+  Module README written; 30 offline tests. Remaining: first full real run on the team machine.

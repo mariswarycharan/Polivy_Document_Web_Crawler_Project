@@ -8,6 +8,7 @@
     python -m search_engine export                    # rebuild search_links.xlsx from what is already collected
     python -m search_engine compare --all             # Phase 3: compare with the crawler output (no network)
     python -m search_engine verify --payer Centene    # Phase 3: check the search-only links, then re-run compare
+    python -m search_engine run --payer Centene       # Phase 4: collect, compare, verify and write Excel in one go
 """
 from __future__ import annotations
 
@@ -194,6 +195,14 @@ def cmd_verify(args) -> int:
     return 0
 
 
+def cmd_run(args) -> int:
+    from .pipeline import run
+    payers = load_payers() if args.all else [find_payer(load_payers(), args.payer)]
+    run(payers, crawl=args.crawl, searxng=args.searxng, skip_collect=args.skip_collect, limit=args.limit,
+        max_queries=args.max_queries, verify_max=args.verify_max, crawler_output=args.crawler_output)
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="python -m search_engine", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -224,8 +233,19 @@ def main(argv=None) -> int:
         p.add_argument("--crawler-output", help="crawler output folder to compare with (default: this project's output/)")
         if name == "verify":
             p.add_argument("--max", type=int, default=None, help="check at most this many links per payer in this run")
+    rn = sub.add_parser("run", help="Phase 4: collect, compare, verify and write the Excel files in one go")
+    g3 = rn.add_mutually_exclusive_group(required=True)
+    g3.add_argument("--payer")
+    g3.add_argument("--all", action="store_true")
+    rn.add_argument("--crawl", action="store_true", help="run the crawler for the payer first (unchanged, own process)")
+    rn.add_argument("--searxng", action="store_true", help="also run the next SearXNG batch")
+    rn.add_argument("--skip-collect", action="store_true", help="use the links already collected")
+    rn.add_argument("--limit", type=int, default=ARCHIVE_LIMIT_PER_DOMAIN)
+    rn.add_argument("--max-queries", type=int, default=SEARXNG_BATCH_QUERIES)
+    rn.add_argument("--verify-max", type=int, default=200, help="links checked per payer (0 = none, -1 = all)")
+    rn.add_argument("--crawler-output", help="crawler output folder to compare with (default: this project's output/)")
     args = ap.parse_args(argv)
-    return {"check": cmd_check, "queries": cmd_queries, "sample": cmd_sample, "collect": cmd_collect,
+    return {"run": cmd_run, "check": cmd_check, "queries": cmd_queries, "sample": cmd_sample, "collect": cmd_collect,
             "export": cmd_export, "compare": cmd_compare, "verify": cmd_verify}[args.cmd](args)
 
 
