@@ -36,6 +36,7 @@ def collect_archive(payer: Payer, store: LinkStore, report: CollectReport, sourc
         for domain in payer.domains:
             for kind in ("docs", "pages"):
                 n, note = 0, ""
+                log(f"  {name:<11} {domain:<35} {kind:<5} searching ...")
                 try:
                     for hit in archive_client.list_domain(domain, src, limit=limit, fetcher=fetcher, kinds=(kind,)):
                         n += 1

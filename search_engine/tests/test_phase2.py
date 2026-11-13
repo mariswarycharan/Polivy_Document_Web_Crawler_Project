@@ -90,3 +90,19 @@ def test_a_skipped_pass_is_logged_and_the_next_domain_still_runs(tmp_path):
     collect_archive(PAYER, st, rep, sources=["cc"], fetcher_factory=lambda s: Fetcher(), log=lines.append)
     assert len(st.rows) == 1 and len(rep.archive_errors) == 2
     assert any("SKIPPED" in l and "centene.com" in l for l in lines)
+
+
+def test_index_server_timeouts_also_give_up_after_three_tries():
+    import pytest
+    import requests
+    from search_engine import archive_client as ac
+    class Real:
+        exceptions = requests.exceptions
+        def get(self, url, params=None, **kw):
+            raise requests.exceptions.ReadTimeout("read timed out")
+    shim = ac._GiveUpRequests(Real())
+    for _ in range(ac.MAX_SERVER_ERRORS - 1):
+        with pytest.raises(requests.exceptions.ReadTimeout):
+            shim.get("https://index.test", params={"url": "*.uhc.com"})
+    with pytest.raises(ac.ArchiveUnavailable):
+        shim.get("https://index.test", params={"url": "*.uhc.com"})

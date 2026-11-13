@@ -34,15 +34,24 @@ class _GiveUpRequests:
     def __getattr__(self, name):          # exceptions, Session, ... come from the real module
         return getattr(self._real, name)
 
+    def _failed(self, key: str, what: str) -> None:
+        n = self._fails.get(key, 0) + 1
+        self._fails[key] = n
+        if n >= MAX_SERVER_ERRORS:
+            self._fails.pop(key, None)
+            raise ArchiveUnavailable(f"index server {what} {n} times in a row")
+
     def get(self, url, params=None, **kw):
-        resp = self._real.get(url, params=params, **kw)
         key = f"{url} {params!r}"
+        try:
+            resp = self._real.get(url, params=params, **kw)
+        except (self._real.exceptions.Timeout, self._real.exceptions.ConnectionError,
+                self._real.exceptions.ChunkedEncodingError):
+            # cdx_toolkit would wait 60 s and retry up to 100 times (about 2.5 hours per domain)
+            self._failed(key, "did not answer in time")
+            raise
         if resp.status_code in (429, 500, 502, 503, 504, 509):
-            n = self._fails.get(key, 0) + 1
-            self._fails[key] = n
-            if n >= MAX_SERVER_ERRORS:
-                self._fails.pop(key, None)
-                raise ArchiveUnavailable(f"index server answered HTTP {resp.status_code} {n} times in a row")
+            self._failed(key, f"answered HTTP {resp.status_code}")
         else:
             self._fails.pop(key, None)
         return resp
