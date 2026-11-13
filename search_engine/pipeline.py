@@ -36,6 +36,8 @@ def collect(payer, source: str, limit: int, max_queries: int, **kw) -> CollectRe
         collect_searxng(payer, store, rep, max_queries=max_queries)
     store.save()
     if source in ("all", "archive"):
+        if rep.archive_resumed:
+            print(f" archive: {rep.archive_resumed} pass(es) already done in an earlier run - skipped")
         print(f" archive: {rep.archive_seen} candidates, {rep.archive_new} new links"
               + (f", {len(rep.archive_errors)} skipped pass(es)" if rep.archive_errors else ""))
         for e in rep.archive_errors[:5]:
@@ -82,12 +84,12 @@ def write_reports(payers, crawler_output=None):
 
 
 def run(payers, crawl=False, searxng=False, skip_collect=False, limit=5000, max_queries=15, verify_max=200,
-        crawler_output=None, runner=subprocess.run):
+        crawler_output=None, runner=subprocess.run, refresh=False):
     for payer in payers:
         if crawl:
             run_crawler(payer, runner)
         if not skip_collect:
-            collect(payer, "all" if searxng else "archive", limit, max_queries)
+            collect(payer, "all" if searxng else "archive", limit, max_queries, refresh=refresh)
         if verify_max != 0:
             verify(payer, crawler_output, None if verify_max < 0 else verify_max)
     return write_reports(payers, crawler_output)

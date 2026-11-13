@@ -113,30 +113,11 @@ def cmd_sample(args) -> int:
 
 
 def cmd_collect(args) -> int:
-    from .collector import CollectReport, collect_archive, collect_searxng
     from .excel_export import export
-    from .store import LinkStore
+    from .pipeline import collect
     payers = load_payers() if args.all else [find_payer(load_payers(), args.payer)]
     for payer in payers:
-        print(f"== {payer.name} ({len(payer.domains)} domain(s))")
-        store = LinkStore(payer.name)
-        rep = CollectReport(payer.name)
-        if args.source in ("all", "archive"):
-            print(" archive indexes:")
-            collect_archive(payer, store, rep, limit=args.limit)
-        if args.source in ("all", "searxng"):
-            print(f" SearXNG (next {args.max_queries} queries):")
-            collect_searxng(payer, store, rep, max_queries=args.max_queries)
-        store.save()
-        print(f" archive: {rep.archive_seen} candidates, {rep.archive_new} new links"
-              + (f", {len(rep.archive_errors)} error(s)" if rep.archive_errors else ""))
-        for e in rep.archive_errors[:5]:
-            print(f"   error: {e}")
-        if args.source in ("all", "searxng"):
-            print(f" SearXNG: {rep.searxng_queries_run} queries run, {rep.searxng_new} new links, "
-                  f"{rep.searxng_queries_left} queries left for later runs"
-                  + (f"; stopped early: {rep.searxng_stopped}" if rep.searxng_stopped else ""))
-        print(f" total links stored for {payer.name}: {len(store.rows)}")
+        collect(payer, args.source, args.limit, args.max_queries, refresh=args.refresh)
     print(f"Excel: {export()}")
     return 0
 
@@ -199,7 +180,8 @@ def cmd_run(args) -> int:
     from .pipeline import run
     payers = load_payers() if args.all else [find_payer(load_payers(), args.payer)]
     run(payers, crawl=args.crawl, searxng=args.searxng, skip_collect=args.skip_collect, limit=args.limit,
-        max_queries=args.max_queries, verify_max=args.verify_max, crawler_output=args.crawler_output)
+        max_queries=args.max_queries, verify_max=args.verify_max, crawler_output=args.crawler_output,
+        refresh=args.refresh)
     return 0
 
 
@@ -219,6 +201,7 @@ def main(argv=None) -> int:
     g.add_argument("--payer", help="payer name or domain")
     g.add_argument("--all", action="store_true", help="every payer in the crawler's registry")
     co.add_argument("--source", choices=["all", "archive", "searxng"], default="all")
+    co.add_argument("--refresh", action="store_true", help="re-read archive passes finished in earlier runs")
     co.add_argument("--limit", type=int, default=ARCHIVE_LIMIT_PER_DOMAIN,
                     help="archive captures read per domain, source and pass")
     co.add_argument("--max-queries", type=int, default=SEARXNG_BATCH_QUERIES,
@@ -240,6 +223,7 @@ def main(argv=None) -> int:
     rn.add_argument("--crawl", action="store_true", help="run the crawler for the payer first (unchanged, own process)")
     rn.add_argument("--searxng", action="store_true", help="also run the next SearXNG batch")
     rn.add_argument("--skip-collect", action="store_true", help="use the links already collected")
+    rn.add_argument("--refresh", action="store_true", help="re-read archive passes finished in earlier runs")
     rn.add_argument("--limit", type=int, default=ARCHIVE_LIMIT_PER_DOMAIN)
     rn.add_argument("--max-queries", type=int, default=SEARXNG_BATCH_QUERIES)
     rn.add_argument("--verify-max", type=int, default=200, help="links checked per payer (0 = none, -1 = all)")

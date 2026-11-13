@@ -12,11 +12,12 @@ from dataclasses import dataclass
 from typing import Iterator
 from urllib.parse import urlsplit
 
-from .config import (ARCHIVE_FROM, ARCHIVE_LIMIT_PER_DOMAIN, DOCUMENT_EXTENSIONS, DOCUMENT_MIME_TYPES,
+from .config import (ARCHIVE_PASS_MAX_MINUTES, ARCHIVE_FROM, ARCHIVE_LIMIT_PER_DOMAIN, DOCUMENT_EXTENSIONS, DOCUMENT_MIME_TYPES,
                      POLICY_PATH_HINTS)
 
 SOURCE_NAMES = {"cc": "commoncrawl", "ia": "wayback"}
 MAX_SERVER_ERRORS = 3     # consecutive 5xx answers to the same index request before that domain is skipped
+_pass_deadline = [0.0]    # monotonic time after which the current pass gives up (0 = no limit)
 
 
 class ArchiveUnavailable(Exception):
@@ -42,6 +43,9 @@ class _GiveUpRequests:
             raise ArchiveUnavailable(f"index server {what} {n} times in a row")
 
     def get(self, url, params=None, **kw):
+        import time
+        if _pass_deadline[0] and time.monotonic() > _pass_deadline[0]:
+            raise ArchiveUnavailable(f"pass took longer than {ARCHIVE_PASS_MAX_MINUTES} minutes")
         key = f"{url} {params!r}"
         try:
             resp = self._real.get(url, params=params, **kw)
@@ -104,7 +108,9 @@ def list_domain(domain: str, source: str = "cc", limit: int = ARCHIVE_LIMIT_PER_
         _install_give_up()
         fetcher = cdx_toolkit.CDXFetcher(source=source)
     extra = {"from_ts": ARCHIVE_FROM} if ARCHIVE_FROM else {}
+    import time
     for kind in kinds:
+        _pass_deadline[0] = time.monotonic() + ARCHIVE_PASS_MAX_MINUTES * 60 if ARCHIVE_PASS_MAX_MINUTES else 0.0
         for obj in fetcher.iter(f"*.{domain}", limit=limit, filter=server_filters(source, kind), **extra):
             url = obj.get("url", "")
             mime = obj.get("mime") or obj.get("mimetype") or ""

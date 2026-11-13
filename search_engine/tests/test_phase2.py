@@ -106,3 +106,36 @@ def test_index_server_timeouts_also_give_up_after_three_tries():
             shim.get("https://index.test", params={"url": "*.uhc.com"})
     with pytest.raises(ac.ArchiveUnavailable):
         shim.get("https://index.test", params={"url": "*.uhc.com"})
+
+
+def test_finished_passes_are_skipped_on_the_next_run_but_failed_ones_are_retried(tmp_path):
+    calls = []
+    class Fetcher:
+        def iter(self, pattern, limit, filter):
+            calls.append(pattern)
+            if "ambetter" in pattern:
+                raise ConnectionError("down")
+            yield {"url": "https://www.centene.com/a.pdf", "mime": "application/pdf", "status": "200", "timestamp": "20260101000000"}
+    args = dict(sources=["cc"], fetcher_factory=lambda s: Fetcher(), log=lambda *a: None, out_dir=tmp_path)
+    collect_archive(PAYER, LinkStore("Centene", tmp_path), CollectReport("Centene"), **args)
+    assert len(calls) == 4                       # 2 domains x 2 passes
+    calls.clear()
+    rep = CollectReport("Centene")
+    collect_archive(PAYER, LinkStore("Centene", tmp_path), rep, **args)
+    assert calls == ["*.ambetterhealth.com", "*.ambetterhealth.com"] and rep.archive_resumed == 2
+    calls.clear()
+    collect_archive(PAYER, LinkStore("Centene", tmp_path), CollectReport("Centene"), refresh=True, **args)
+    assert len(calls) == 4
+
+
+def test_a_pass_that_runs_too_long_is_given_up(monkeypatch):
+    import pytest
+    from search_engine import archive_client as ac
+    class Real:
+        import requests
+        exceptions = requests.exceptions
+        def get(self, url, params=None, **kw):
+            raise AssertionError("must not be called after the deadline")
+    monkeypatch.setattr(ac, "_pass_deadline", [1.0])     # a monotonic time long past
+    with pytest.raises(ac.ArchiveUnavailable, match="longer than"):
+        ac._GiveUpRequests(Real()).get("https://index.test")

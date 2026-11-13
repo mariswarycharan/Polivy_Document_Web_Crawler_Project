@@ -21,6 +21,7 @@ class CollectReport:
     archive_new: int = 0
     archive_seen: int = 0
     archive_errors: list[str] = field(default_factory=list)
+    archive_resumed: int = 0           # passes skipped because an earlier run finished them
     searxng_queries_run: int = 0
     searxng_queries_left: int = 0
     searxng_new: int = 0
@@ -28,13 +29,26 @@ class CollectReport:
     searxng_stopped: str = ""          # why the batch stopped early (CAPTCHA, suspended, unreachable)
 
 
+def archive_progress_path(payer: Payer, out_dir: Path = OUTPUT_DIR) -> Path:
+    return Path(out_dir) / f"archive_progress_{slug(payer.name)}.json"
+
+
 def collect_archive(payer: Payer, store: LinkStore, report: CollectReport, sources=ARCHIVE_SOURCES,
-                    limit: int = ARCHIVE_LIMIT_PER_DOMAIN, fetcher_factory=None, log=print) -> None:
+                    limit: int = ARCHIVE_LIMIT_PER_DOMAIN, fetcher_factory=None, log=print,
+                    out_dir: Path | None = None, refresh: bool = False) -> None:
+    """Passes that finished in an earlier run are skipped (so a stopped run resumes); skipped-with-error
+    passes are tried again. refresh=True re-reads everything."""
+    prog_path = archive_progress_path(payer, out_dir or store.path.parent)   # progress lives next to the links
+    done: dict = {} if refresh or not prog_path.exists() else json.loads(prog_path.read_text(encoding="utf-8"))
     for src in sources:
         fetcher = fetcher_factory(src) if fetcher_factory else None
         name = archive_client.SOURCE_NAMES.get(src, src)
         for domain in payer.domains:
             for kind in ("docs", "pages"):
+                pkey = f"{src}|{domain}|{kind}"
+                if pkey in done and not done[pkey].get("error"):
+                    report.archive_resumed += 1
+                    continue
                 n, note = 0, ""
                 log(f"  {name:<11} {domain:<35} {kind:<5} searching ...")
                 try:
@@ -49,6 +63,9 @@ def collect_archive(payer: Payer, store: LinkStore, report: CollectReport, sourc
                     report.archive_errors.append(f"{name} {domain} {kind}: {type(e).__name__}: {str(e)[:120]}")
                 log(f"  {name:<11} {domain:<35} {kind:<5} {n} candidate URL(s){note}")
                 store.save()
+                done[pkey] = {"candidates": n, "error": note.strip(), "at": now_utc()}
+                prog_path.parent.mkdir(parents=True, exist_ok=True)
+                prog_path.write_text(json.dumps(done, indent=1), encoding="utf-8")
 
 
 def _progress_path(payer: Payer, out_dir: Path) -> Path:

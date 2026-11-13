@@ -35,6 +35,7 @@ FILE_TYPES = ["pdf"]             # an extra query with filetype:<x> is built for
 # --------------------------------------------------------------------------- web-archive URL indexes
 ARCHIVE_SOURCES = ["cc", "ia"]   # cc = Common Crawl, ia = Internet Archive (Wayback Machine)
 ARCHIVE_LIMIT_PER_DOMAIN = 5000  # captures read per domain, source and pass (documents / policy pages)
+ARCHIVE_PASS_MAX_MINUTES = 15     # one domain pass gives up after this long and the run moves on (0 = no limit)
 ARCHIVE_FROM = ""                # e.g. "2023" to read Common Crawl indexes from 2023 on; "" = the last 12 months
 DOCUMENT_MIME_TYPES = (
     "application/pdf",
