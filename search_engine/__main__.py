@@ -10,6 +10,9 @@ import argparse
 import itertools
 import sys
 import threading
+import warnings
+
+warnings.filterwarnings("ignore", message=r"urllib3 .* doesn't match a supported version")  # harmless requests notice
 
 from . import archive_client
 from .payers import find_payer, load_payers
@@ -26,10 +29,14 @@ def cmd_check(args) -> int:
     if h["error"]:
         print(f"  NOT OK - {h['error']}")
         rc = 1
+    elif h["unresponsive"] or not h["results"]:
+        print(f"  NOT OK - SearXNG is running at {h['url']}, but the search engines returned {h['results']} results")
+        for u in h["unresponsive"]:
+            print(f"    engine not answering: {u}")
+        print("    (after a CAPTCHA, SearXNG pauses that engine for 24 h by default)")
+        rc = 1
     else:
         print(f"  OK - {h['url']} answered, {h['results']} results from engines {h['engines']}")
-        for u in h["unresponsive"]:
-            print(f"  warning - engine not answering: {u}")
     print("Archive indexes:")
     domain = args.domain or load_payers()[0].hint_host
     for src in ("cc", "ia"):
