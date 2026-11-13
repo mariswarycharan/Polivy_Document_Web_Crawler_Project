@@ -40,12 +40,15 @@ upstream engines (DuckDuckGo, Brave, Mojeek, Google, Bing ...), then merges the 
 
 ### Phase 1 - Foundation and SearXNG setup
 - Folder layout inside `search_engine/` (config, collectors, compare, verify, output, tests).
-- SearXNG running locally (WSL2 or Docker - see Decisions), `settings.yml` with JSON enabled, limiter off, a secret key, and a
-  hand-picked engine list; a health check that confirms which engines answer.
+- SearXNG running locally in **WSL2 with a minimal Linux (Debian) stored on the E: drive - no Docker**,
+  started only when needed. `settings.yml` with JSON enabled, limiter off, a secret key, and a hand-picked
+  engine list; a health check that confirms which engines answer.
+- Archive-index client (`cdx_toolkit`, pure Python, a few MB) checked against one payer domain.
 - Config file: which payers, which domains (taken read-only from the crawler's payer registry), query
   terms, rate limits, output paths.
 - Query builder: payer domains x policy terms -> list of queries.
-- **Done when:** one payer's queries run against local SearXNG and return JSON results.
+- **Done when:** one payer's queries return JSON results from local SearXNG, and the archive client lists
+  URLs for one payer domain.
 
 ### Phase 2 - Link collection -> `search_links.xlsx`
 - SearXNG collector with paging, polite delays, retry/backoff, and per-engine suspension detection.
@@ -82,9 +85,11 @@ upstream engines (DuckDuckGo, Brave, Mojeek, Google, Bing ...), then merges the 
   final verified-links file). They are compared with the crawler output so repeated links are removed, but
   they are **never merged** into the crawler's `output.csv`.
 
+- **Both sources are used:** SearXNG (the search engine agreed by the team) for keyword discovery, plus the
+  Common Crawl / Internet Archive indexes for domain-wide discovery.
+- **SearXNG setup is kept light** because disk space is limited: WSL2 with a minimal Debian placed on the
+  E: drive, no Docker Desktop. Rough footprint 0.5-1.5 GB; nothing runs in the background unless started.
+
 ## Open questions
-1. **How to run SearXNG on Windows.** SearXNG supports Linux only, so on Windows it needs either
-   WSL2 (a Linux environment built into Windows; SearXNG installed inside it, no Docker) or Docker Desktop
-   (which itself runs on WSL2). Which one to use?
-2. Which upstream engines are acceptable (DuckDuckGo, Brave, Mojeek, Qwant ...)? Google and Bing do not
+1. Which upstream engines are acceptable (DuckDuckGo, Brave, Mojeek, Qwant ...)? Google and Bing do not
    allow automated querying.
