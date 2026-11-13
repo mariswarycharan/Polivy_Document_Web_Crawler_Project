@@ -152,7 +152,7 @@ def _payers_with_links(args):
     return [(p, list(LinkStore(p.name).rows.values())) for p in payers]
 
 
-def _write_gap(pairs) -> None:
+def _write_gap(pairs, crawler_output=None) -> None:
     from .compare import compare, load_crawler_view
     from .gap_export import export
     from .verify import VerifyStore
@@ -160,7 +160,7 @@ def _write_gap(pairs) -> None:
     for payer, links in pairs:
         if not links:
             continue
-        c = compare(payer.name, links, load_crawler_view(payer.name))
+        c = compare(payer.name, links, load_crawler_view(payer.name, crawler_output))
         comps.append(c)
         verified[payer.name] = VerifyStore(payer.name).rows
         crawler_note = "" if c.view.available else "  (no crawler output for this payer yet)"
@@ -172,7 +172,7 @@ def _write_gap(pairs) -> None:
 
 
 def cmd_compare(args) -> int:
-    _write_gap(_payers_with_links(args))
+    _write_gap(_payers_with_links(args), args.crawler_output)
     return 0
 
 
@@ -184,13 +184,13 @@ def cmd_verify(args) -> int:
         if not links:
             print(f"{payer.name}: no search links collected yet")
             continue
-        c = compare(payer.name, links, load_crawler_view(payer.name))
+        c = compare(payer.name, links, load_crawler_view(payer.name, args.crawler_output))
         store = VerifyStore(payer.name)
         left = sum(1 for r in c.search_only if r["url_key"] not in store.rows)
         print(f"== {payer.name}: {len(c.search_only)} search-only link(s), {left} not yet verified")
         n = verify_links(c.search_only, payer.alias or payer.name, store, max_links=args.max)
         print(f"   checked {n} in this run")
-    _write_gap(pairs)
+    _write_gap(pairs, args.crawler_output)
     return 0
 
 
@@ -221,6 +221,7 @@ def main(argv=None) -> int:
         g2 = p.add_mutually_exclusive_group(required=True)
         g2.add_argument("--payer")
         g2.add_argument("--all", action="store_true")
+        p.add_argument("--crawler-output", help="crawler output folder to compare with (default: this project's output/)")
         if name == "verify":
             p.add_argument("--max", type=int, default=None, help="check at most this many links per payer in this run")
     args = ap.parse_args(argv)
