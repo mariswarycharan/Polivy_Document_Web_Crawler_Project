@@ -59,3 +59,34 @@ def test_excel_has_links_and_summary(tmp_path):
     assert wb.sheetnames == ["links", "summary"]
     assert wb["links"].max_row == 3
     assert [c.value for c in wb["summary"][2]] == ["Centene", 2, 1, 0, 1, 0, 1, 1]
+
+
+def test_index_server_errors_give_up_after_three_tries():
+    import pytest
+    from search_engine import archive_client as ac
+    class Resp:
+        def __init__(self, code): self.status_code = code
+    class Real:
+        calls = 0
+        def get(self, url, params=None, **kw):
+            Real.calls += 1
+            return Resp(504)
+    shim = ac._GiveUpRequests(Real())
+    for _ in range(ac.MAX_SERVER_ERRORS - 1):
+        assert shim.get("https://index.test", params={"url": "*.x.com"}).status_code == 504
+    with pytest.raises(ac.ArchiveUnavailable):
+        shim.get("https://index.test", params={"url": "*.x.com"})
+
+
+def test_a_skipped_pass_is_logged_and_the_next_domain_still_runs(tmp_path):
+    from search_engine.archive_client import ArchiveUnavailable
+    class Fetcher:
+        def iter(self, pattern, limit, filter):
+            if "centene" in pattern:
+                raise ArchiveUnavailable("index server answered HTTP 504 3 times in a row")
+            yield {"url": "https://www.ambetterhealth.com/x.pdf", "mime": "application/pdf", "status": "200", "timestamp": "20260101000000"}
+    lines = []
+    st, rep = LinkStore("Centene", tmp_path), CollectReport("Centene")
+    collect_archive(PAYER, st, rep, sources=["cc"], fetcher_factory=lambda s: Fetcher(), log=lines.append)
+    assert len(st.rows) == 1 and len(rep.archive_errors) == 2
+    assert any("SKIPPED" in l and "centene.com" in l for l in lines)

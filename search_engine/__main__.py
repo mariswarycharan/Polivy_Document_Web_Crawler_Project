@@ -13,9 +13,11 @@ import argparse
 import itertools
 import sys
 import threading
+import logging
 import warnings
 
 warnings.filterwarnings("ignore", message=r"urllib3 .* doesn't match a supported version")  # harmless requests notice
+logging.getLogger("cdx_toolkit").setLevel(logging.ERROR)   # its retry messages print whole HTML error pages
 
 from . import archive_client
 from .config import ARCHIVE_LIMIT_PER_DOMAIN, SEARXNG_BATCH_QUERIES

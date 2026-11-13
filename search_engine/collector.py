@@ -32,20 +32,22 @@ def collect_archive(payer: Payer, store: LinkStore, report: CollectReport, sourc
                     limit: int = ARCHIVE_LIMIT_PER_DOMAIN, fetcher_factory=None, log=print) -> None:
     for src in sources:
         fetcher = fetcher_factory(src) if fetcher_factory else None
+        name = archive_client.SOURCE_NAMES.get(src, src)
         for domain in payer.domains:
-            n = 0
-            try:
-                for hit in archive_client.list_domain(domain, src, limit=limit, fetcher=fetcher):
-                    n += 1
-                    report.archive_seen += 1
-                    if store.add(hit.url, hit.source, kind=hit.kind, mime=hit.mime,
-                                 capture_date=hit.timestamp[:8]):
-                        report.archive_new += 1
-            except Exception as e:   # one domain/source failing must not stop the rest
-                report.archive_errors.append(f"{archive_client.SOURCE_NAMES.get(src, src)} {domain}: "
-                                             f"{type(e).__name__}: {str(e)[:120]}")
-            log(f"  {archive_client.SOURCE_NAMES.get(src, src):<11} {domain:<35} {n} candidate URL(s)")
-            store.save()
+            for kind in ("docs", "pages"):
+                n, note = 0, ""
+                try:
+                    for hit in archive_client.list_domain(domain, src, limit=limit, fetcher=fetcher, kinds=(kind,)):
+                        n += 1
+                        report.archive_seen += 1
+                        if store.add(hit.url, hit.source, kind=hit.kind, mime=hit.mime,
+                                     capture_date=hit.timestamp[:8]):
+                            report.archive_new += 1
+                except Exception as e:   # one domain/source/pass failing must not stop the rest
+                    note = f"  SKIPPED - {type(e).__name__}: {str(e)[:100]}"
+                    report.archive_errors.append(f"{name} {domain} {kind}: {type(e).__name__}: {str(e)[:120]}")
+                log(f"  {name:<11} {domain:<35} {kind:<5} {n} candidate URL(s){note}")
+                store.save()
 
 
 def _progress_path(payer: Payer, out_dir: Path) -> Path:
