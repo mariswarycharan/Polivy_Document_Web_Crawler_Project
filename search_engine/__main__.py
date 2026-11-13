@@ -112,12 +112,16 @@ def cmd_sample(args) -> int:
     return 0
 
 
+def _archives(args):
+    return {"both": None, "commoncrawl": ["cc"], "wayback": ["ia"]}[args.archives]
+
+
 def cmd_collect(args) -> int:
     from .excel_export import export
     from .pipeline import collect
     payers = load_payers() if args.all else [find_payer(load_payers(), args.payer)]
     for payer in payers:
-        collect(payer, args.source, args.limit, args.max_queries, refresh=args.refresh)
+        collect(payer, args.source, args.limit, args.max_queries, refresh=args.refresh, archives=_archives(args))
     print(f"Excel: {export()}")
     return 0
 
@@ -181,7 +185,7 @@ def cmd_run(args) -> int:
     payers = load_payers() if args.all else [find_payer(load_payers(), args.payer)]
     run(payers, crawl=args.crawl, searxng=args.searxng, skip_collect=args.skip_collect, limit=args.limit,
         max_queries=args.max_queries, verify_max=args.verify_max, crawler_output=args.crawler_output,
-        refresh=args.refresh)
+        refresh=args.refresh, archives=_archives(args))
     return 0
 
 
@@ -202,6 +206,8 @@ def main(argv=None) -> int:
     g.add_argument("--all", action="store_true", help="every payer in the crawler's registry")
     co.add_argument("--source", choices=["all", "archive", "searxng"], default="all")
     co.add_argument("--refresh", action="store_true", help="re-read archive passes finished in earlier runs")
+    co.add_argument("--archives", choices=["both", "commoncrawl", "wayback"], default="both",
+                    help="which archive index to read (default both)")
     co.add_argument("--limit", type=int, default=ARCHIVE_LIMIT_PER_DOMAIN,
                     help="archive captures read per domain, source and pass")
     co.add_argument("--max-queries", type=int, default=SEARXNG_BATCH_QUERIES,
@@ -224,6 +230,8 @@ def main(argv=None) -> int:
     rn.add_argument("--searxng", action="store_true", help="also run the next SearXNG batch")
     rn.add_argument("--skip-collect", action="store_true", help="use the links already collected")
     rn.add_argument("--refresh", action="store_true", help="re-read archive passes finished in earlier runs")
+    rn.add_argument("--archives", choices=["both", "commoncrawl", "wayback"], default="both",
+                    help="which archive index to read (default both)")
     rn.add_argument("--limit", type=int, default=ARCHIVE_LIMIT_PER_DOMAIN)
     rn.add_argument("--max-queries", type=int, default=SEARXNG_BATCH_QUERIES)
     rn.add_argument("--verify-max", type=int, default=200, help="links checked per payer (0 = none, -1 = all)")

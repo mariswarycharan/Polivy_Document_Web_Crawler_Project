@@ -20,7 +20,7 @@ def test_crawler_is_run_unchanged_for_the_payer():
 def test_run_calls_crawl_collect_verify_then_reports(monkeypatch):
     steps = []
     monkeypatch.setattr(pipeline, "run_crawler", lambda p, r: steps.append(("crawl", p.name)))
-    monkeypatch.setattr(pipeline, "collect", lambda p, src, lim, mq, refresh=False: steps.append(("collect", src, lim)))
+    monkeypatch.setattr(pipeline, "collect", lambda p, src, lim, mq, refresh=False, archives=None: steps.append(("collect", src, lim)))
     monkeypatch.setattr(pipeline, "verify", lambda p, out, mx: steps.append(("verify", mx)))
     monkeypatch.setattr(pipeline, "write_reports", lambda ps, out: steps.append(("reports",)) or ("a", "b", "c"))
     pipeline.run(PAYERS, crawl=True, searxng=True, limit=100, verify_max=-1)
@@ -30,7 +30,7 @@ def test_run_calls_crawl_collect_verify_then_reports(monkeypatch):
 def test_run_without_crawl_or_verification(monkeypatch):
     steps = []
     monkeypatch.setattr(pipeline, "run_crawler", lambda p, r: steps.append("crawl"))
-    monkeypatch.setattr(pipeline, "collect", lambda p, src, lim, mq, refresh=False: steps.append(f"collect:{src}"))
+    monkeypatch.setattr(pipeline, "collect", lambda p, src, lim, mq, refresh=False, archives=None: steps.append(f"collect:{src}"))
     monkeypatch.setattr(pipeline, "verify", lambda p, out, mx: steps.append("verify"))
     monkeypatch.setattr(pipeline, "write_reports", lambda ps, out: steps.append("reports"))
     pipeline.run(PAYERS, verify_max=0)

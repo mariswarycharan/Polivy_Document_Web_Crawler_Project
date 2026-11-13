@@ -25,11 +25,13 @@ def run_crawler(payer, runner=subprocess.run) -> int:
     return rc
 
 
-def collect(payer, source: str, limit: int, max_queries: int, **kw) -> CollectReport:
+def collect(payer, source: str, limit: int, max_queries: int, archives=None, **kw) -> CollectReport:
     print(f"== {payer.name} ({len(payer.domains)} domain(s))")
     store, rep = LinkStore(payer.name), CollectReport(payer.name)
     if source in ("all", "archive"):
         print(" archive indexes:")
+        if archives:
+            kw["sources"] = archives
         collect_archive(payer, store, rep, limit=limit, **kw)
     if source in ("all", "searxng"):
         print(f" SearXNG (next {max_queries} queries):")
@@ -84,12 +86,12 @@ def write_reports(payers, crawler_output=None):
 
 
 def run(payers, crawl=False, searxng=False, skip_collect=False, limit=5000, max_queries=15, verify_max=200,
-        crawler_output=None, runner=subprocess.run, refresh=False):
+        crawler_output=None, runner=subprocess.run, refresh=False, archives=None):
     for payer in payers:
         if crawl:
             run_crawler(payer, runner)
         if not skip_collect:
-            collect(payer, "all" if searxng else "archive", limit, max_queries, refresh=refresh)
+            collect(payer, "all" if searxng else "archive", limit, max_queries, refresh=refresh, archives=archives)
         if verify_max != 0:
             verify(payer, crawler_output, None if verify_max < 0 else verify_max)
     return write_reports(payers, crawler_output)
