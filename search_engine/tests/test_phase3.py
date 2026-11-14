@@ -135,3 +135,28 @@ def test_old_connection_failures_are_retried(tmp_path):
     f.write_text(json.dumps({"url_key": "a", "verdict": "unreachable", "reason": "ConnectError"}) + "\n" +
                  json.dumps({"url_key": "b", "verdict": "unreachable", "reason": "HTTP 404"}) + "\n", encoding="utf-8")
     assert set(VerifyStore("Test", out_dir=tmp_path).rows) == {"b"}
+
+
+def test_redirect_to_a_dead_host_is_saved_as_a_dead_link(tmp_path):
+    from types import SimpleNamespace
+    from search_engine.verify import VerifyStore, verify_links
+
+    class Client:
+        def get(self, url, follow_redirects=True):
+            return SimpleNamespace(status_code=301, headers={"location": "https://old.retired.example/x.pdf"},
+                                   close=lambda: None)
+
+    class RedirectingFetcher:
+        client = Client()
+        def fetch(self, url):
+            return SimpleNamespace(error="ConnectError", blocked="", status=0, final_url="", content=b"",
+                                   content_type="")
+        def close(self):
+            pass
+
+    links = [{"url_key": f"x.com/{i}.pdf", "url": f"https://x.com/{i}.pdf"} for i in range(15)]
+    store = VerifyStore("Test", out_dir=tmp_path)
+    assert verify_links(links, "Test", store, fetcher=RedirectingFetcher(), log=lambda *_: None) == 15
+    row = store.rows["x.com/0.pdf"]
+    assert row["verdict"] == "unreachable" and "old.retired.example" in row["reason"]
+    assert set(VerifyStore("Test", out_dir=tmp_path).rows) == set(store.rows)   # kept on reload, not retried

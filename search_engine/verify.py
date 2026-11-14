@@ -27,6 +27,27 @@ def is_network_error(reason: str) -> bool:
     return any(reason.startswith(e) for e in NETWORK_ERRORS)
 
 
+def dead_redirect(fetcher, url: str) -> str:
+    """After a connection failure: ask the link's own host without following redirects. If that host answers
+    with a redirect, the failure is at the redirect target (a retired host) - the link is dead, the network is
+    fine. Returns a reason text for that case, '' when the link's own host cannot be reached either."""
+    from urllib.parse import urljoin, urlparse
+    client = getattr(fetcher, "client", None)
+    if client is None:
+        return ""
+    if hasattr(fetcher, "wait_turn"):
+        fetcher.wait_turn(url)                       # same politeness gap as every other request
+    try:
+        r = client.get(url, follow_redirects=False)
+        r.close()
+    except Exception:
+        return ""
+    if 300 <= r.status_code < 400 and r.headers.get("location"):
+        host = urlparse(urljoin(url, r.headers["location"])).netloc
+        return f"redirects to {host}, which cannot be reached (retired link)"
+    return f"own host answered HTTP {r.status_code} without the content"
+
+
 @dataclass
 class Verdict:
     url_key: str
@@ -85,7 +106,8 @@ class VerifyStore:
             for line in self.path.read_text(encoding="utf-8").splitlines():
                 if line.strip():
                     v = json.loads(line)
-                    if v.get("verdict") == "unreachable" and is_network_error(v.get("reason", "")):
+                    r = v.get("reason", "")
+                    if v.get("verdict") == "unreachable" and is_network_error(r) and ": " not in r:
                         self.rows.pop(v["url_key"], None)       # connection failure: retry it next run
                         continue
                     self.rows[v["url_key"]] = v
@@ -120,6 +142,11 @@ def verify_links(links: list[dict], payer_alias: str, store: VerifyStore, max_li
                 ins = inspect(r.content, r.content_type, r.final_url or link["url"], payer_alias)
             v = judge(link, r, ins)
             if v.verdict == "unreachable" and is_network_error(v.reason):
+                dead = dead_redirect(fetcher, link["url"])
+                if dead:                              # the site answered: a dead link, not a network problem
+                    v.reason = f"{v.reason}: {dead}"
+                    v.verdict = "unreachable"
+            if v.verdict == "unreachable" and is_network_error(v.reason) and ": " not in v.reason:
                 in_a_row += 1
                 log(f"  [{i}/{len(todo)}] no connection ({v.reason}) - not saved, will retry {link['url'][:90]}")
                 if in_a_row >= STOP_AFTER_NETWORK_ERRORS:
