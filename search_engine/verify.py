@@ -13,6 +13,19 @@ from pathlib import Path
 from .config import OUTPUT_DIR
 from .store import now_utc, slug
 
+# Errors that mean "this machine could not reach the site", not "the link is bad". They are never saved as
+# a final verdict, so a later run retries them; a run stops early when they repeat back to back.
+NETWORK_ERRORS = ("ConnectError", "ConnectTimeout", "NetworkError", "host_unreachable")
+STOP_AFTER_NETWORK_ERRORS = 10
+
+
+class NetworkDown(RuntimeError):
+    """Raised when many links in a row fail to connect - the network or DNS is down, not the links."""
+
+
+def is_network_error(reason: str) -> bool:
+    return any(reason.startswith(e) for e in NETWORK_ERRORS)
+
 
 @dataclass
 class Verdict:
@@ -72,6 +85,9 @@ class VerifyStore:
             for line in self.path.read_text(encoding="utf-8").splitlines():
                 if line.strip():
                     v = json.loads(line)
+                    if v.get("verdict") == "unreachable" and is_network_error(v.get("reason", "")):
+                        self.rows.pop(v["url_key"], None)       # connection failure: retry it next run
+                        continue
                     self.rows[v["url_key"]] = v
 
     def put(self, v: Verdict) -> None:
@@ -95,6 +111,7 @@ def verify_links(links: list[dict], payer_alias: str, store: VerifyStore, max_li
         fetcher = Fetcher()
     if inspect is None:
         from crawler_io import inspect_content as inspect
+    in_a_row, done = 0, 0
     try:
         for i, link in enumerate(todo, 1):
             r = fetcher.fetch(link["url"])
@@ -102,9 +119,19 @@ def verify_links(links: list[dict], payer_alias: str, store: VerifyStore, max_li
             if not (r.error or r.blocked or not r.status or r.status >= 400):
                 ins = inspect(r.content, r.content_type, r.final_url or link["url"], payer_alias)
             v = judge(link, r, ins)
+            if v.verdict == "unreachable" and is_network_error(v.reason):
+                in_a_row += 1
+                log(f"  [{i}/{len(todo)}] no connection ({v.reason}) - not saved, will retry {link['url'][:90]}")
+                if in_a_row >= STOP_AFTER_NETWORK_ERRORS:
+                    raise NetworkDown(f"{in_a_row} links in a row could not connect ({v.reason}). This machine "
+                                      "cannot reach the site right now - check the internet/DNS/proxy in this "
+                                      "terminal, then run verify again (nothing was lost).")
+                continue
+            in_a_row = 0
             store.put(v)
+            done += 1
             log(f"  [{i}/{len(todo)}] {v.verdict:<11} {link['url'][:110]}")
     finally:
         if own:
             fetcher.close()
-    return len(todo)
+    return done

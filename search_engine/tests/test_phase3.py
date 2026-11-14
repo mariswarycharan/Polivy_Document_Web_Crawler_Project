@@ -107,3 +107,31 @@ def test_verification_resumes_and_gap_files_are_written(tmp_path):
     row = [x.value for x in wb["summary"][2]]
     assert row[:8] == [PAYER, 1, 5, 1, 100.0, 2, 2, 2]
     assert load_workbook(final)["new_policy_documents"].max_row == 3
+
+
+def test_connection_errors_are_not_saved_and_stop_the_run(tmp_path):
+    from types import SimpleNamespace
+    from search_engine.verify import NetworkDown, VerifyStore, verify_links
+
+    class DeadFetcher:
+        def fetch(self, url):
+            return SimpleNamespace(error="ConnectError", blocked="", status=0, final_url="", content=b"",
+                                   content_type="")
+        def close(self):
+            pass
+
+    links = [{"url_key": f"x.com/{i}.pdf", "url": f"https://x.com/{i}.pdf"} for i in range(30)]
+    store = VerifyStore("Test", out_dir=tmp_path)
+    import pytest
+    with pytest.raises(NetworkDown):
+        verify_links(links, "Test", store, fetcher=DeadFetcher(), log=lambda *_: None)
+    assert store.rows == {}
+
+
+def test_old_connection_failures_are_retried(tmp_path):
+    import json
+    from search_engine.verify import VerifyStore
+    f = tmp_path / "verified_Test.jsonl"
+    f.write_text(json.dumps({"url_key": "a", "verdict": "unreachable", "reason": "ConnectError"}) + "\n" +
+                 json.dumps({"url_key": "b", "verdict": "unreachable", "reason": "HTTP 404"}) + "\n", encoding="utf-8")
+    assert set(VerifyStore("Test", out_dir=tmp_path).rows) == {"b"}

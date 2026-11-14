@@ -164,7 +164,7 @@ def cmd_compare(args) -> int:
 
 def cmd_verify(args) -> int:
     from .compare import compare, load_crawler_view
-    from .verify import VerifyStore, verify_links
+    from .verify import NetworkDown, VerifyStore, verify_links
     pairs = _payers_with_links(args)
     for payer, links in pairs:
         if not links:
@@ -174,7 +174,11 @@ def cmd_verify(args) -> int:
         store = VerifyStore(payer.name)
         left = sum(1 for r in c.search_only if r["url_key"] not in store.rows)
         print(f"== {payer.name}: {len(c.search_only)} search-only link(s), {left} not yet verified")
-        n = verify_links(c.search_only, payer.alias or payer.name, store, max_links=args.max)
+        try:
+            n = verify_links(c.search_only, payer.alias or payer.name, store, max_links=args.max)
+        except NetworkDown as e:
+            print(f"   STOPPED: {e}")
+            return 1
         print(f"   checked {n} in this run")
     _write_gap(pairs, args.crawler_output)
     return 0

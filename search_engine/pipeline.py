@@ -10,7 +10,7 @@ from .compare import compare, load_crawler_view
 from .excel_export import export as export_links
 from .gap_export import export as export_gap
 from .store import LinkStore
-from .verify import VerifyStore, verify_links
+from .verify import NetworkDown, VerifyStore, verify_links
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -61,7 +61,11 @@ def verify(payer, crawler_output=None, max_links=None) -> int:
     store = VerifyStore(payer.name)
     left = sum(1 for r in c.search_only if r["url_key"] not in store.rows)
     print(f"== {payer.name}: {len(c.search_only)} search-only link(s), {left} not yet verified")
-    n = verify_links(c.search_only, payer.alias or payer.name, store, max_links=max_links)
+    try:
+        n = verify_links(c.search_only, payer.alias or payer.name, store, max_links=max_links)
+    except NetworkDown as e:
+        print(f"   STOPPED: {e}")
+        return 0
     print(f"   checked {n} in this run")
     return n
 
