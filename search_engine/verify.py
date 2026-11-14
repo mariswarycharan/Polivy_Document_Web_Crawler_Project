@@ -27,27 +27,6 @@ def is_network_error(reason: str) -> bool:
     return any(reason.startswith(e) for e in NETWORK_ERRORS)
 
 
-def dead_redirect(fetcher, url: str) -> str:
-    """After a connection failure: ask the link's own host without following redirects. If that host answers
-    with a redirect, the failure is at the redirect target (a retired host) - the link is dead, the network is
-    fine. Returns a reason text for that case, '' when the link's own host cannot be reached either."""
-    from urllib.parse import urljoin, urlparse
-    client = getattr(fetcher, "client", None)
-    if client is None:
-        return ""
-    if hasattr(fetcher, "wait_turn"):
-        fetcher.wait_turn(url)                       # same politeness gap as every other request
-    try:
-        r = client.get(url, follow_redirects=False)
-        r.close()
-    except Exception:
-        return ""
-    if 300 <= r.status_code < 400 and r.headers.get("location"):
-        host = urlparse(urljoin(url, r.headers["location"])).netloc
-        return f"redirects to {host}, which cannot be reached (retired link)"
-    return f"own host answered HTTP {r.status_code} without the content"
-
-
 @dataclass
 class Verdict:
     url_key: str
@@ -63,6 +42,49 @@ class Verdict:
     confidence: float = 0.0
     final_url: str = ""
     checked_at: str = ""
+
+
+def dead_redirect(fetcher, url: str, max_hops: int = 10) -> str:
+    """After a connection failure: walk the redirect chain one hop at a time. If the link's own host answers
+    with redirects that end at a host that cannot be reached, the link is dead (retired host) and the
+    network is fine. Returns a reason text naming that host, '' when the link's own host cannot be reached."""
+    from urllib.parse import urljoin, urlparse
+    client = getattr(fetcher, "client", None)
+    if client is None:
+        return ""
+    current, hops = url, []
+    for _ in range(max_hops):
+        if hasattr(fetcher, "wait_turn"):
+            fetcher.wait_turn(current)               # same politeness gap as every other request
+        try:
+            r = client.get(current, follow_redirects=False)
+            r.close()
+        except Exception:
+            if not hops:
+                return ""                            # the link's own host is down: a network problem
+            return f"redirects ({' -> '.join(hops)}) to {urlparse(current).netloc}, which cannot be reached (retired link)"
+        if 300 <= r.status_code < 400 and r.headers.get("location"):
+            hops.append(urlparse(current).netloc)
+            current = urljoin(current, r.headers["location"])
+            continue
+        return f"own host answered HTTP {r.status_code} without the content"
+    return "too many redirects"
+
+
+def skip_reason(url: str) -> str:
+    """Why a link is not worth fetching (never a policy document), or ''."""
+    from urllib.parse import urlparse
+    from .config import VERIFY_SKIP_HOST_PREFIXES, VERIFY_SKIP_PATH_HINTS
+    p = urlparse(url)
+    host, path = (p.hostname or "").lower(), (p.path or "").lower()
+    if any(host.startswith(h) for h in VERIFY_SKIP_HOST_PREFIXES) or any(h in path for h in VERIFY_SKIP_PATH_HINTS):
+        return "skipped: careers / jobs page (not a policy document)"
+    return ""
+
+
+def newest_first(links: list[dict]) -> list[dict]:
+    """Archive captures newest first; links with no capture date (live search results) go first of all."""
+    return sorted(links, key=lambda l: l.get("capture_date") or "99999999", reverse=True)
 
 
 def _title(ins, fallback: str) -> str:
@@ -123,6 +145,17 @@ def verify_links(links: list[dict], payer_alias: str, store: VerifyStore, max_li
                  fetcher=None, inspect=None, log=print) -> int:
     """Verify links not yet in the store. Returns how many were checked in this run."""
     todo = [l for l in links if l["url_key"] not in store.rows]
+    rest = []
+    for l in todo:                                   # obvious non-policy pages: record without fetching
+        why = skip_reason(l["url"])
+        if why:
+            store.put(Verdict(url_key=l["url_key"], url=l["url"], verdict="rejected", reason=why,
+                              checked_at=now_utc()))
+        else:
+            rest.append(l)
+    if len(rest) < len(todo):
+        log(f"  skipped {len(todo) - len(rest)} careers / jobs link(s) without fetching")
+    todo = newest_first(rest)
     if max_links is not None:
         todo = todo[:max_links]
     if not todo:

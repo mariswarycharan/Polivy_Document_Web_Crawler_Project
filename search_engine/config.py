@@ -59,3 +59,9 @@ def user_agent() -> str:
         return USER_AGENT
     except Exception:  # pragma: no cover - crawler not importable
         return "PolicyDiscoveryBot/2.0 (+public policy document inventory)"
+
+
+# ---- Phase 3 verification ----
+# Links on these hosts / paths are never policy documents: recorded as rejected without being fetched.
+VERIFY_SKIP_HOST_PREFIXES = ["careers.", "jobs.", "job.", "talent."]
+VERIFY_SKIP_PATH_HINTS = ["/careers/", "/jobs/", "/job/"]

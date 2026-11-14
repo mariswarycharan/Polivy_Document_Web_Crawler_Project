@@ -143,6 +143,8 @@ def test_redirect_to_a_dead_host_is_saved_as_a_dead_link(tmp_path):
 
     class Client:
         def get(self, url, follow_redirects=True):
+            if "retired" in url:
+                raise OSError("getaddrinfo failed")
             return SimpleNamespace(status_code=301, headers={"location": "https://old.retired.example/x.pdf"},
                                    close=lambda: None)
 
@@ -160,3 +162,27 @@ def test_redirect_to_a_dead_host_is_saved_as_a_dead_link(tmp_path):
     row = store.rows["x.com/0.pdf"]
     assert row["verdict"] == "unreachable" and "old.retired.example" in row["reason"]
     assert set(VerifyStore("Test", out_dir=tmp_path).rows) == set(store.rows)   # kept on reload, not retried
+
+
+def test_verify_order_and_skips():
+    from search_engine.verify import newest_first, skip_reason
+    links = [{"url": "a", "capture_date": "20060101"}, {"url": "b", "capture_date": "20250101"}, {"url": "c"}]
+    assert [l["url"] for l in newest_first(links)] == ["c", "b", "a"]
+    assert skip_reason("https://careers.elevancehealth.com/x")
+    assert skip_reason("https://www.anthem.com/careers/nurse")
+    assert not skip_reason("https://www.anthem.com/provider/policies/clinical.pdf")
+
+
+def test_redirect_chain_names_the_dead_host():
+    from types import SimpleNamespace
+    from search_engine.verify import dead_redirect
+
+    class Client:
+        def get(self, url, follow_redirects=True):
+            if "old.example" in url:
+                raise OSError("getaddrinfo failed")
+            loc = {"https://x.com/a.pdf": "https://x.com/b.pdf", "https://x.com/b.pdf": "https://old.example/b.pdf"}[url]
+            return SimpleNamespace(status_code=301, headers={"location": loc}, close=lambda: None)
+
+    why = dead_redirect(SimpleNamespace(client=Client()), "https://x.com/a.pdf")
+    assert "old.example" in why and "retired" in why
