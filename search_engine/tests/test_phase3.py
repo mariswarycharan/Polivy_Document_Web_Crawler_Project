@@ -186,3 +186,21 @@ def test_redirect_chain_names_the_dead_host():
 
     why = dead_redirect(SimpleNamespace(client=Client()), "https://x.com/a.pdf")
     assert "old.example" in why and "retired" in why
+
+
+def test_strict_review_rejects_and_downgrades():
+    from search_engine.verify import strict_review
+    acc = dict(url="https://x.com/docs/maryland-member-authorization-form-english.pdf", verdict="accepted",
+               reason="ok", title="Instructions for Completing the Member Authorization Form", document_type="pa_form",
+               confidence=0.68, link_score=10.7, content_score=2.5, file_type="pdf")
+    out = strict_review(acc)
+    assert out["verdict"] == "rejected" and out["crawler_verdict"] == "accepted" and "HIPAA" in out["reason"]
+    assert strict_review(out)["verdict"] == "rejected"                        # idempotent
+    weak = dict(acc, url="https://x.com/a/IA_Thing.pdf", title="", document_type="other", confidence=0.6)
+    assert strict_review(weak)["verdict"] == "ambiguous"
+    good = dict(acc, url="https://x.com/medpolicies/gl_pw_e001737.html", title="CG-MED-90 Chelation Therapy",
+                document_type="coverage_guideline", confidence=0.75)
+    assert strict_review(good)["verdict"] == "accepted"
+    dental = dict(good, url="https://x.com/forms/MULTI-WP-dental-claims-submission.pdf", title="Dental")
+    assert strict_review(dental)["verdict"] == "accepted"
+    assert strict_review(dict(acc, verdict="unreachable"))["verdict"] == "unreachable"

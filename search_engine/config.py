@@ -65,3 +65,24 @@ def user_agent() -> str:
 # Links on these hosts / paths are never policy documents: recorded as rejected without being fetched.
 VERIFY_SKIP_HOST_PREFIXES = ["careers.", "jobs.", "job.", "talent."]
 VERIFY_SKIP_PATH_HINTS = ["/careers/", "/jobs/", "/job/"]
+
+# ---- Strict review (search engine only; runs after the crawler's own rules, never changes the crawler) ----
+# Accepted / ambiguous links whose title or file name matches one of these are rejected. Label -> regex.
+STRICT_REJECT_PATTERNS = {
+    "HIPAA authorization to release records (not a prior-auth form)":
+        r"(member|enrollee|patient)[\s_-]*authori[sz]ation|authori[sz]ation[\s_-]*(form)?[\s_-]*hipaa|hipaa[\s_-]*authori[sz]ation",
+    "privacy / nondiscrimination / language notice":
+        r"privacy|non[\s_-]?discrimination|nopp\b|substitute[\s_-]*notice|subsitute|interpreter|tagline",
+    "corporate / ESG / financial report":
+        r"impact[\s_-]*report|environmental[\s_-]*polic|sustainability|tcfd|assurance[\s_-]*statement|earnings|"
+        r"gender[\s_-]*pay|annual[\s_-]*report|investor",
+    "marketing / case study / research":
+        r"case[\s_-]*study|casestudy|e-?book|white[\s_-]*paper|(?:^|[\s/])wp-|infographic|newsletter|flyer|partnership[\s_-]*profile|"
+        r"druginsights|public[\s_-]*policy[\s_-]*institute|ppi_|brg_|journey",
+    "technical / API documentation": r"\bapi\b|api[\s_-]*doc|interoperability|developers?[\s_-]*portal",
+    "member handbook / plan summary": r"member[\s_-]*handbook|\bsbc\b|summary[\s_-]*of[\s_-]*benefits",
+    "statistics report (prior-auth metrics)": r"priorauths?[\s_-]*metrics|prior[\s_-]*auths?[\s_-]*metrics",
+}
+# Accepted links are moved to "ambiguous" (for the local AI / a person) when the evidence is thin:
+STRICT_MIN_CONFIDENCE_FOR_OTHER = 0.80   # document type "other" needs at least this confidence
+STRICT_MIN_LINK_SCORE = 0.0              # link / title score below this = the title does not look like a policy

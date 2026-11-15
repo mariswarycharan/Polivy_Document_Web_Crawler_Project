@@ -17,7 +17,7 @@ from .config import OUTPUT_DIR
 from .excel_export import _clean
 
 RESULT_COLS = ["payer", "url", "title", "document_type", "file_type", "confidence", "content_score", "link_score",
-               "sources", "why_missed", "reason", "http_status", "final_url", "checked_at", "url_key"]
+               "sources", "why_missed", "reason", "crawler_verdict", "crawler_reason", "http_status", "final_url", "checked_at", "url_key"]
 
 
 def _sheet(wb, title, cols, rows, widths=None):

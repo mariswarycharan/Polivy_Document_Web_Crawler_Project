@@ -120,6 +120,37 @@ def judge(link: dict, fetch_result, ins) -> Verdict:
                    content_score=round(cs, 2), link_score=round(ls, 2), confidence=round(conf, 2), **base)
 
 
+def strict_review(row: dict) -> dict:
+    """Search-engine-only second look at a verdict (a dict as stored). Idempotent: the crawler rules' verdict is
+    kept in 'crawler_verdict' / 'crawler_reason', so changing the patterns in config re-applies to old rows."""
+    import re
+    from urllib.parse import urlparse
+    from .config import (STRICT_MIN_CONFIDENCE_FOR_OTHER, STRICT_MIN_LINK_SCORE, STRICT_REJECT_PATTERNS)
+    row = dict(row)
+    base_v = row.setdefault("crawler_verdict", row.get("verdict", ""))
+    base_r = row.setdefault("crawler_reason", row.get("reason", ""))
+    row["verdict"], row["reason"] = base_v, base_r
+    if base_v not in ("accepted", "ambiguous"):
+        return row
+    name = urlparse(row.get("url", "")).path.rsplit("/", 1)[-1]
+    text = f"{row.get('title', '')} {name} {urlparse(row.get('url', '')).path}"
+    for label, rx in STRICT_REJECT_PATTERNS.items():
+        if re.search(rx, text, re.I):
+            row["verdict"], row["reason"] = "rejected", f"strict filter: {label}"
+            return row
+    if base_v == "accepted":
+        why = ""
+        if row.get("file_type") in ("xls", "xlsx", "csv") and not row.get("content_score"):
+            why = "spreadsheet accepted on its name only"
+        elif row.get("document_type") == "other" and row.get("confidence", 0) < STRICT_MIN_CONFIDENCE_FOR_OTHER:
+            why = f"unknown document type with low confidence ({row.get('confidence', 0)})"
+        elif row.get("link_score", 0) < STRICT_MIN_LINK_SCORE:
+            why = "title / link does not look like a policy document"
+        if why:
+            row["verdict"], row["reason"] = "ambiguous", f"strict filter: {why}"
+    return row
+
+
 class VerifyStore:
     def __init__(self, payer: str, out_dir: Path = OUTPUT_DIR) -> None:
         self.path = Path(out_dir) / f"verified_{slug(payer)}.jsonl"
@@ -132,10 +163,10 @@ class VerifyStore:
                     if v.get("verdict") == "unreachable" and is_network_error(r) and ": " not in r:
                         self.rows.pop(v["url_key"], None)       # connection failure: retry it next run
                         continue
-                    self.rows[v["url_key"]] = v
+                    self.rows[v["url_key"]] = strict_review(v)
 
     def put(self, v: Verdict) -> None:
-        self.rows[v.url_key] = asdict(v)
+        self.rows[v.url_key] = strict_review(asdict(v))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(asdict(v), ensure_ascii=False) + "\n")
@@ -190,7 +221,9 @@ def verify_links(links: list[dict], payer_alias: str, store: VerifyStore, max_li
             in_a_row = 0
             store.put(v)
             done += 1
-            log(f"  [{i}/{len(todo)}] {v.verdict:<11} {link['url'][:110]}")
+            final = store.rows[v.url_key]["verdict"]
+            note = "" if final == v.verdict else f" (crawler rules: {v.verdict}; {store.rows[v.url_key]['reason']})"
+            log(f"  [{i}/{len(todo)}] {final:<11} {link['url'][:110]}{note}")
     finally:
         if own:
             fetcher.close()
