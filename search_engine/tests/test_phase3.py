@@ -106,7 +106,9 @@ def test_verification_resumes_and_gap_files_are_written(tmp_path):
     assert wb.sheetnames == ["summary", "new_policy_documents", "search_only_other", "seen_by_crawler", "found_by_both"]
     row = [x.value for x in wb["summary"][2]]
     assert row[:8] == [PAYER, 1, 5, 1, 100.0, 2, 2, 2]
-    assert load_workbook(final)["new_policy_documents"].max_row == 3
+    res = load_workbook(final)
+    assert res.sheetnames == ["confirmed_by_rules", "accepted_by_local_AI"]
+    assert res["confirmed_by_rules"].max_row == 3 and res["accepted_by_local_AI"].max_row == 1
 
 
 def test_connection_errors_are_not_saved_and_stop_the_run(tmp_path):

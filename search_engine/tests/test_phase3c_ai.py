@@ -153,3 +153,12 @@ def test_member_material_ids_are_rejected():
                reason="x", title="", document_type="coverage_guideline", file_type="pdf", confidence=0.9,
                link_score=5, content_score=5)
     assert strict_review(row)["verdict"] == "rejected"
+
+
+def test_more_ways_the_ai_says_no():
+    for reason in ("HHS Federal Review Form, not a specific medical or pharmacy policy",
+                   "Fact sheet related to Medicaid policy, not a direct policy",
+                   "File name suggests a document, but content not provided"):
+        assert ai_decide({"is_policy_document": True, "confidence": 0.9, "reason": reason}, 1, 0, [])[0] == "rejected"
+    ok = {"is_policy_document": True, "confidence": 0.98, "reason": "Clinical Utilization Management Guidelines for Medicaid"}
+    assert ai_decide(ok, 1, 0, [])[0] == "accepted"

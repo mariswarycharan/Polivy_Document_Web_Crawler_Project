@@ -86,7 +86,10 @@ def export(comparisons: list[Comparison], verified: dict[str, dict[str, dict]], 
 
     res = Workbook()
     res.remove(res.active)
-    _sheet(res, "new_policy_documents", RESULT_COLS, groups["new_policy_documents"])
+    by_rules = [r for r in groups["new_policy_documents"] if not r.get("ai_verdict")]
+    by_ai = [r for r in groups["new_policy_documents"] if r.get("ai_verdict")]
+    _sheet(res, "confirmed_by_rules", RESULT_COLS, by_rules)        # crawler rules accepted on their own
+    _sheet(res, "accepted_by_local_AI", RESULT_COLS, by_ai)         # rules unsure, the local AI said yes - check these
     final = out_dir / "search_engine_results.xlsx"
     res.save(final)
     return gap, final
