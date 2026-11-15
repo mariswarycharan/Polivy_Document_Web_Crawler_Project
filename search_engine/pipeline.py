@@ -76,9 +76,10 @@ def verify(payer, crawler_output=None, max_links=None, use_ai=True) -> int:
     print(f"   checked {n} in this run")
     if classifier is not None:
         from .ai_review import review_ambiguous
-        old = [r for r in store.rows.values() if r.get("verdict") == "ambiguous" and not r.get("ai_verdict")]
+        from .ai_review import needs_ai
+        old = [r for r in store.rows.values() if needs_ai(r)]
         if old:
-            print(f"== local AI review of {len(old)} ambiguous link(s) from earlier runs")
+            print(f"== local AI review of {len(old)} link(s) from earlier runs (ambiguous, or decided with an older prompt)")
             m = review_ambiguous(old, payer.alias or payer.name, store, classifier, max_links=max_links)
             print(f"   settled {m} in this run")
     return n

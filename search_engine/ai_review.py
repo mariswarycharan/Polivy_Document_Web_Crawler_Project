@@ -90,19 +90,39 @@ def ai_decide(ai: dict | None, ls: float, cs: float, link_signals: list[str]) ->
     return "accepted", 0.60, f"local AI rejected/unsure, but {why}"
 
 
+def describe_file_name(url: str) -> str:
+    """The link's file name in words, with payer abbreviations spelled out:
+    'MDWP_CAID_AUG24CUMG.pdf' -> 'file name: MDWP_CAID_AUG24CUMG.pdf (mdwp caid aug24 cumg pdf; caid = medicaid,
+    cumg = clinical utilization management guidelines)'."""
+    import re
+    from urllib.parse import unquote, urlparse
+    from crawler_text import url_words
+    from .config import AI_FILENAME_ABBREVIATIONS
+    name = unquote(urlparse(url).path.rsplit("/", 1)[-1]) or url
+    words = url_words("/" + name)
+    tokens = set(re.findall(r"[a-z]+", words))                 # 'aug24' 'cumg' -> 'aug', 'cumg'
+    found = [f"{k} = {v}" for k, v in AI_FILENAME_ABBREVIATIONS.items() if k in tokens]
+    return f"file name: {name} ({words}" + (f"; {', '.join(found)}" if found else "") + ")"
+
+
 def settle(row: dict, ins, payer_alias: str, classifier) -> dict:
     """Ask the AI about one ambiguous row (with its fetched content `ins`) and return the updated stored row."""
     from crawler_text import content_fingerprint, score_link
+    from .config import AI_PROMPT_VERSION
     title = row.get("title", "")
     ls, sigs = score_link(row["url"], anchor=title, is_page=(ins.file_type == "html"))
     cs, _ = content_fingerprint(ins.text)
     title_guess = ins.heading_title or (ins.titles[0] if getattr(ins, "titles", None) else "") or title
-    ai = classifier.classify(payer_alias, row.get("final_url") or row["url"], title, "", title_guess, ins.text,
-                             is_disambiguation=True)
+    link_text = title or describe_file_name(row["url"])          # never an empty link text
+    context = describe_file_name(row["url"])
+    ai = classifier.classify(payer_alias, row.get("final_url") or row["url"], link_text, context,
+                             title_guess or link_text, ins.text, is_disambiguation=True)
     verdict, conf, why = ai_decide(ai, ls, cs, sigs)
     out = dict(row)
-    out.update(pre_ai_verdict=row.get("crawler_verdict", row.get("verdict")),
-               pre_ai_reason=row.get("crawler_reason", row.get("reason")),
+    first = "pre_ai_verdict" not in row                          # a re-ask keeps the original rule verdict
+    out.update(pre_ai_verdict=row.get("crawler_verdict", row.get("verdict")) if first else row["pre_ai_verdict"],
+               pre_ai_reason=row.get("crawler_reason", row.get("reason")) if first else row.get("pre_ai_reason", ""),
+               ai_version=AI_PROMPT_VERSION,
                verdict=verdict, reason=why, confidence=conf,
                ai_verdict=("policy" if ai and ai.get("is_policy_document") else "not policy" if ai else "no answer"),
                ai_confidence=float(ai.get("confidence", 0)) if ai else 0.0,
@@ -116,10 +136,18 @@ def settle(row: dict, ins, payer_alias: str, classifier) -> dict:
     return out
 
 
+def needs_ai(row: dict) -> bool:
+    """Ambiguous and not yet seen by the AI, or settled by the AI with an older prompt version."""
+    from .config import AI_PROMPT_VERSION
+    if row.get("ai_verdict"):
+        return row.get("ai_version", 1) < AI_PROMPT_VERSION
+    return row.get("verdict") == "ambiguous"
+
+
 def review_ambiguous(rows: list[dict], payer_alias: str, store, classifier, fetcher=None, inspect=None,
                      max_links: int | None = None, log=print) -> int:
     """Re-fetch each ambiguous row not yet seen by the AI, ask the AI, save the settled verdict. Returns count."""
-    todo = [r for r in rows if r.get("verdict") == "ambiguous" and not r.get("ai_verdict")]
+    todo = [r for r in rows if needs_ai(r)]
     if max_links is not None:
         todo = todo[:max_links]
     if not todo:

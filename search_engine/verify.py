@@ -134,6 +134,8 @@ def strict_review(row: dict) -> dict:
         return row
     name = urlparse(row.get("url", "")).path.rsplit("/", 1)[-1]
     text = f"{row.get('title', '')} {name} {urlparse(row.get('url', '')).path}"
+    if row.get("ai_verdict") == "policy":            # what the AI itself says the document is counts too
+        text += f" {row.get('ai_reason', '')}"
     for label, rx in STRICT_REJECT_PATTERNS.items():
         if re.search(rx, text, re.I):
             row["verdict"], row["reason"] = "rejected", f"strict filter: {label}"

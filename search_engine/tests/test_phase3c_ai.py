@@ -74,3 +74,43 @@ def test_json_cache_round_trip(tmp_path):
     c = JsonCache(tmp_path / "c.jsonl")
     c.llm_put("a", {"is_policy_document": True})
     assert JsonCache(tmp_path / "c.jsonl").llm_get("a") == {"is_policy_document": True}
+
+
+def test_file_name_is_spelled_out_for_the_ai():
+    from search_engine.ai_review import describe_file_name
+    d = describe_file_name("https://x.com/a/MDWP_CAID_AUG24CUMG.pdf")
+    assert "MDWP_CAID_AUG24CUMG.pdf" in d and "clinical utilization management guidelines" in d and "medicaid" in d
+    assert "medicare" not in describe_file_name("https://x.com/a/healthcare-guide.pdf")
+
+
+def test_ai_gets_the_file_name_when_the_title_is_empty():
+    seen = {}
+
+    class Spy(FakeAI):
+        def classify(self, payer, url, anchor, context, title, text, is_disambiguation=True):
+            seen.update(anchor=anchor, context=context)
+            return self.answer
+
+    row = dict(url_key="k", url="https://x.com/MDWP_CAID_AUG24CUMG.pdf", verdict="ambiguous", reason="mixed",
+               title="", document_type="other", file_type="pdf", link_score=0, content_score=0)
+    settle(row, _ins(), "Test", Spy({"is_policy_document": True, "confidence": 0.9, "reason": "ok"}))
+    assert "CUMG" in seen["anchor"] and "clinical utilization management" in seen["context"]
+
+
+def test_ai_reason_is_checked_by_the_strict_filter():
+    row = dict(url_key="k", url="https://x.com/DC_WP_AM_HHSNotice.pdf", verdict="ambiguous", reason="mixed",
+               title="", document_type="other", file_type="pdf", link_score=0, content_score=0)
+    out = settle(row, _ins(), "Test", FakeAI({"is_policy_document": True, "confidence": 0.95,
+                                              "reason": "Notice of Privacy Practices with prior authorization info"}))
+    assert out["verdict"] == "accepted" and strict_review(out)["verdict"] == "rejected"
+
+
+def test_older_ai_answers_are_asked_again_and_keep_the_first_rule_verdict():
+    from search_engine.ai_review import needs_ai
+    from search_engine.config import AI_PROMPT_VERSION
+    old = dict(url_key="k", url="https://x.com/a.pdf", verdict="rejected", ai_verdict="not policy", ai_version=1,
+               pre_ai_verdict="ambiguous", pre_ai_reason="mixed evidence", title="", document_type="other",
+               file_type="pdf", link_score=0, content_score=0)
+    assert needs_ai(old) and not needs_ai(dict(old, ai_version=AI_PROMPT_VERSION))
+    out = settle(old, _ins(), "Test", FakeAI({"is_policy_document": True, "confidence": 0.9, "reason": "ok"}))
+    assert out["pre_ai_verdict"] == "ambiguous" and out["ai_version"] == AI_PROMPT_VERSION

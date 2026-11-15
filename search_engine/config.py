@@ -86,3 +86,15 @@ STRICT_REJECT_PATTERNS = {
 # Accepted links are moved to "ambiguous" (for the local AI / a person) when the evidence is thin:
 STRICT_MIN_CONFIDENCE_FOR_OTHER = 0.80   # document type "other" needs at least this confidence
 STRICT_MIN_LINK_SCORE = 0.0              # link / title score below this = the title does not look like a policy
+
+# ---- Local AI (Phase 3c) ----
+AI_PROMPT_VERSION = 2          # raise this to have the AI decide again on links it settled with an older prompt
+# Abbreviations in payer file names, spelled out for the AI (file name word -> meaning). Matched as whole words.
+AI_FILENAME_ABBREVIATIONS = {
+    "cumg": "clinical utilization management guidelines", "cpg": "clinical practice guidelines",
+    "um": "utilization management", "pa": "prior authorization", "precert": "precertification",
+    "mp": "medical policy", "cg": "clinical guideline", "rp": "reimbursement policy", "pdl": "preferred drug list",
+    "caid": "medicaid", "dsnp": "dual special needs plan", "snp": "special needs plan",
+    "bh": "behavioral health", "ltss": "long-term services and supports", "hcbs": "home and community based services",
+    "nopp": "notice of privacy practices", "sbc": "summary of benefits and coverage",
+}
