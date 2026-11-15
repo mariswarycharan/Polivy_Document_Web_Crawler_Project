@@ -70,7 +70,11 @@ def make_classifier(out_dir: Path = OUTPUT_DIR):
 
 def ai_decide(ai: dict | None, ls: float, cs: float, link_signals: list[str]) -> tuple[str, float, str]:
     """Pure decision step (no network): the crawler's Gate 3 after the AI answered. Returns (verdict, confidence, reason)."""
+    import re
     from crawler_config import OLLAMA_MODEL
+    from .config import AI_SAYS_NO_PATTERNS
+    if ai is not None and ai.get("is_policy_document") and re.search(AI_SAYS_NO_PATTERNS, ai.get("reason", ""), re.I):
+        ai = dict(ai, is_policy_document=False)          # its own words say no: trust the words
     if ai is None:                                           # AI failed on this one: crawler's no-LLM fallback
         if cs >= 3 or ls >= 5:
             return "accepted", 0.50, "mixed rule evidence, accepted without AI confirmation (AI gave no answer)"
@@ -88,6 +92,19 @@ def ai_decide(ai: dict | None, ls: float, cs: float, link_signals: list[str]) ->
         return "rejected", 0.0, (f"local AI ({OLLAMA_MODEL}) rejected: {ai.get('reason', '')}; "
                                  f"rule scores insufficient (ls={ls}, cs={cs})")
     return "accepted", 0.60, f"local AI rejected/unsure, but {why}"
+
+
+def redecide(row: dict) -> tuple[str, str]:
+    """Gate 3 again from a stored row's saved AI answer (no network, no AI call), so changes to the decision
+    rules apply to old answers too. Returns (verdict, reason)."""
+    from crawler_text import score_link
+    ai = None
+    if row.get("ai_verdict") in ("policy", "not policy"):
+        ai = {"is_policy_document": row["ai_verdict"] == "policy", "confidence": row.get("ai_confidence", 0),
+              "reason": row.get("ai_reason", "")}
+    _, sigs = score_link(row["url"], anchor=row.get("title", ""))
+    verdict, _conf, why = ai_decide(ai, row.get("link_score", 0) or 0, row.get("content_score", 0) or 0, sigs)
+    return verdict, why
 
 
 def describe_file_name(url: str) -> str:
@@ -131,9 +148,43 @@ def settle(row: dict, ins, payer_alias: str, classifier) -> dict:
                ai_line_of_business=(ai or {}).get("line_of_business", ""))
     for k in ("crawler_verdict", "crawler_reason"):          # strict_review recomputes these from the new verdict
         out.pop(k, None)
-    if verdict == "accepted" and ai and ai.get("document_type") and row.get("document_type") in ("", "other"):
-        out["document_type"] = ai["document_type"]
+    if ai and ai.get("document_type") and row.get("document_type") in ("", "other"):
+        out["document_type"] = ai["document_type"]      # also lets EXCLUDED_DOC_TYPES apply to AI answers
     return out
+
+
+def language_base(url: str) -> str:
+    """File name without its language suffix: in_x_eng.pdf / in_x_spa.pdf -> in_x.pdf (same document)."""
+    import re
+    from urllib.parse import urlparse
+    from .config import LANGUAGE_SUFFIXES
+    p = urlparse(url)
+    name = p.path.rsplit("/", 1)[-1].lower()
+    suf = "|".join(sorted(LANGUAGE_SUFFIXES, key=len, reverse=True))
+    base = re.sub(rf"[_-](?:{suf})(?=\.[a-z0-9]+$|$)", "", name)
+    return f"{p.netloc.lower()}{p.path.rsplit('/', 1)[0].lower()}/{base}"
+
+
+def copy_sibling(row: dict, store) -> dict | None:
+    """If another language version of this document was already decided by the AI (current prompt), reuse it."""
+    from .config import AI_PROMPT_VERSION
+    base = language_base(row["url"])
+    for other in store.rows.values():
+        if other["url_key"] != row["url_key"] and other.get("ai_verdict") and \
+                other.get("ai_version", 1) >= AI_PROMPT_VERSION and language_base(other["url"]) == base:
+            out = dict(row)
+            first = "pre_ai_verdict" not in row
+            out.update({k: other.get(k) for k in ("ai_verdict", "ai_confidence", "ai_reason", "ai_document_type",
+                                                  "ai_line_of_business", "ai_version", "confidence")})
+            out.update(pre_ai_verdict=row.get("crawler_verdict", row.get("verdict")) if first else row["pre_ai_verdict"],
+                       pre_ai_reason=row.get("crawler_reason", row.get("reason")) if first else row.get("pre_ai_reason", ""),
+                       verdict=other["verdict"], ai_from=other["url"],
+                       reason=f"same document in another language: {other['url'].rsplit('/', 1)[-1][:60]}",
+                       document_type=other.get("document_type", row.get("document_type", "")))
+            out.pop("crawler_verdict", None)
+            out.pop("crawler_reason", None)
+            return out
+    return None
 
 
 def needs_ai(row: dict) -> bool:
@@ -161,6 +212,12 @@ def review_ambiguous(rows: list[dict], payer_alias: str, store, classifier, fetc
     done = 0
     try:
         for i, row in enumerate(todo, 1):
+            twin = copy_sibling(row, store)
+            if twin is not None:                         # other language version already decided: no fetch, no AI
+                store.put_row(twin)
+                done += 1
+                log(f"  [{i}/{len(todo)}] {store.rows[row['url_key']]['verdict']:<9} same as other language   {row['url'][:80]}")
+                continue
             r = fetcher.fetch(row["url"])
             if r.error or r.blocked or not r.status or r.status >= 400:
                 log(f"  [{i}/{len(todo)}] skipped (could not fetch again: {r.blocked or r.error or r.status}) {row['url'][:90]}")

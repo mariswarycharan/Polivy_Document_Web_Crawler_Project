@@ -82,7 +82,27 @@ STRICT_REJECT_PATTERNS = {
     "technical / API documentation": r"\bapi\b|api[\s_-]*doc|interoperability|developers?[\s_-]*portal",
     "member handbook / plan summary": r"member[\s_-]*handbook|\bsbc\b|summary[\s_-]*of[\s_-]*benefits",
     "statistics report (prior-auth metrics)": r"priorauths?[\s_-]*metrics|prior[\s_-]*auths?[\s_-]*metrics",
+    "member HIPAA-rights form (records, disclosures, restrictions)":
+        r"access[\s_-]*to[\s_-]*records|accounting[\s_-]*of[\s_-]*disclosures|amendment[\s_-]*of[\s_-]*records|"
+        r"restriction[\s_-]*of[\s_-]*information|cancel[\s_-]*restrictions?|confidential[\s_-]*communications?|"
+        r"cancel[\s_-]*authori[sz]ation|advance[\s_-]*directive",
+    "member rights / appeal / grievance material":
+        r"member[\s_-]*rights|rights[\s_-]*(and|&)?[\s_-]*responsibilit|member[\s_-]*appeal|appeal[\s_-]*request|"
+        r"complaints?[\s_-]*(and|&)?[\s_-]*appeals?|grievance|notice[\s_-]*of[\s_-]*action|noticeaction",
+    "member letter template": r"coverage[\s_-]*approved|not[\s_-]*medically[\s_-]*necessary[\s_-]*letter|approval[\s_-]*letter|denial[\s_-]*letter",
+    "language-assistance / civil-rights notice":
+        r"language[\s_-]*assistance|hhs[\s_-]*notice|civil[\s_-]*rights|\d{6,}[a-z]{2,3}(en|sp)(wlp|mub)(?![a-z])",
+    "member guide / program summary / compliance notice":
+        r"member[\s_-]*guide|memberguide|quality[\s_-]*improvement[\s_-]*program|false[\s_-]*claims|overview[\s_-]*of",
+    "training / presentation / program promotion":
+        r"training[\s_-]*academy|presentation|recognition[\s_-]*program|healthy[\s_-]*rewards|legislative[\s_-]*report|"
+        r"nadac|regional[\s_-]*manager[\s_-]*map|patient[\s_-]*360|comparison[\s_-]*chart",
+    "member / provider administrative form (not prior authorization)":
+        r"pcp[\s_-]*change|change[\s_-]*request|provider[\s_-]*application|ohi[\s_-]*form|other[\s_-]*health[\s_-]*insurance|"
+        r"notification[\s_-]*of[\s_-]*delivery|attestation",
 }
+# Phrases in the AI's own reason that mean "no", whatever its yes/no field says.
+AI_SAYS_NO_PATTERNS = r"not\s+(a|an)?\s*(specific|clear|actual)?\s*polic|not\s+policy|no\s+policy|not\s+(a\s+)?(clinical|coverage|medical)\s+polic"
 # Accepted links are moved to "ambiguous" (for the local AI / a person) when the evidence is thin:
 STRICT_MIN_CONFIDENCE_FOR_OTHER = 0.80   # document type "other" needs at least this confidence
 STRICT_MIN_LINK_SCORE = 0.0              # link / title score below this = the title does not look like a policy
@@ -98,3 +118,6 @@ AI_FILENAME_ABBREVIATIONS = {
     "bh": "behavioral health", "ltss": "long-term services and supports", "hcbs": "home and community based services",
     "nopp": "notice of privacy practices", "sbc": "summary of benefits and coverage",
 }
+# Language versions of one document (file names ending in these) get one shared AI decision.
+LANGUAGE_SUFFIXES = ["english", "eng", "en", "spanish", "spa", "spn", "sp", "es", "arabic", "ar", "french", "fr",
+                     "chinese", "zh", "korean", "ko", "russian", "ru", "vietnamese", "vi"]

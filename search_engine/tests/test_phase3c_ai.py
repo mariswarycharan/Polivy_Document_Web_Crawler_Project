@@ -114,3 +114,42 @@ def test_older_ai_answers_are_asked_again_and_keep_the_first_rule_verdict():
     assert needs_ai(old) and not needs_ai(dict(old, ai_version=AI_PROMPT_VERSION))
     out = settle(old, _ins(), "Test", FakeAI({"is_policy_document": True, "confidence": 0.9, "reason": "ok"}))
     assert out["pre_ai_verdict"] == "ambiguous" and out["ai_version"] == AI_PROMPT_VERSION
+
+
+def test_ai_reason_saying_no_wins_over_its_yes_flag():
+    ai = {"is_policy_document": True, "confidence": 0.9, "reason": "Educational material, not a specific policy document"}
+    assert ai_decide(ai, 1, 0, [])[0] == "rejected"
+
+
+def test_crawler_excluded_doc_types_apply_to_ai_answers():
+    row = dict(url_key="k", url="https://x.com/TN_CAID_CaseManagementBooklet.pdf", verdict="accepted", reason="ai",
+               pre_ai_verdict="ambiguous", pre_ai_reason="mixed", ai_verdict="policy", ai_confidence=0.9,
+               ai_reason="Provider manual with case management information", ai_document_type="provider_manual",
+               title="", document_type="other", file_type="pdf", link_score=0, content_score=0)
+    out = strict_review(row)
+    assert out["verdict"] == "rejected" and "provider_manual" in out["reason"]
+    assert out["crawler_verdict"] == "ambiguous"
+
+
+def test_language_versions_share_one_decision(tmp_path):
+    from search_engine.ai_review import copy_sibling, language_base
+    assert language_base("https://a.com/d/inin_caid_x_eng.pdf") == language_base("https://a.com/d/inin_caid_x_spa.pdf")
+    assert language_base("https://a.com/d/x_eng.pdf") != language_base("https://b.com/d/x_spa.pdf")
+    store = VerifyStore("Test", out_dir=tmp_path)
+    en = dict(url_key="en", url="https://a.com/d/WA_CAID_Feb24CUMG_eng.pdf", verdict="accepted", reason="ai",
+              pre_ai_verdict="ambiguous", pre_ai_reason="mixed", ai_verdict="policy", ai_confidence=0.98,
+              ai_reason="Clinical Utilization Management Guidelines", ai_document_type="coverage_guideline",
+              ai_version=2, title="", document_type="coverage_guideline", file_type="pdf", link_score=8, content_score=4)
+    store.put_row(en)
+    sp = dict(url_key="sp", url="https://a.com/d/WA_CAID_Feb24CUMG_spa.pdf", verdict="ambiguous", reason="mixed",
+              title="", document_type="other", file_type="pdf", link_score=8, content_score=4)
+    twin = copy_sibling(sp, store)
+    store.put_row(twin)
+    assert store.rows["sp"]["verdict"] == store.rows["en"]["verdict"] == "accepted"
+
+
+def test_member_material_ids_are_rejected():
+    row = dict(url_key="k", url="https://file.wellpoint.com/2025/1065837MDCENWLP_2025.pdf", verdict="accepted",
+               reason="x", title="", document_type="coverage_guideline", file_type="pdf", confidence=0.9,
+               link_score=5, content_score=5)
+    assert strict_review(row)["verdict"] == "rejected"

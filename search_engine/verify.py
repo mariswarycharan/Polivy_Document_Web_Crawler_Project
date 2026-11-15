@@ -127,10 +127,28 @@ def strict_review(row: dict) -> dict:
     from urllib.parse import urlparse
     from .config import (STRICT_MIN_CONFIDENCE_FOR_OTHER, STRICT_MIN_LINK_SCORE, STRICT_REJECT_PATTERNS)
     row = dict(row)
-    base_v = row.setdefault("crawler_verdict", row.get("verdict", ""))
-    base_r = row.setdefault("crawler_reason", row.get("reason", ""))
+    if "pre_ai_verdict" in row and row.get("ai_verdict"):          # settled by the local AI: decide again
+        from .ai_review import redecide                            # from the saved answer (rules may have changed)
+        base_v, base_r = redecide(row)
+        row["crawler_verdict"], row["crawler_reason"] = row["pre_ai_verdict"], row.get("pre_ai_reason", "")
+        if row.get("ai_document_type") and row.get("document_type") in ("", "other", None):
+            row["document_type"] = row["ai_document_type"]
+    else:
+        base_v = row.setdefault("crawler_verdict", row.get("verdict", ""))
+        base_r = row.setdefault("crawler_reason", row.get("reason", ""))
     row["verdict"], row["reason"] = base_v, base_r
     if base_v not in ("accepted", "ambiguous"):
+        return row
+    try:
+        from crawler_config import EXCLUDED_DOC_TYPES      # the crawler's own setting, read not changed
+    except Exception:                                    # pragma: no cover
+        EXCLUDED_DOC_TYPES = ()
+    dtype = row.get("document_type") or ""
+    if row.get("ai_verdict") == "policy" and row.get("ai_document_type") in EXCLUDED_DOC_TYPES:
+        dtype = row["ai_document_type"]                            # the AI's type counts when it said yes
+    if dtype in EXCLUDED_DOC_TYPES:
+        row["verdict"], row["reason"] = "rejected", (f"strict filter: document type '{dtype}' is "
+                                                     "excluded (EXCLUDED_DOC_TYPES in crawler_config.py)")
         return row
     name = urlparse(row.get("url", "")).path.rsplit("/", 1)[-1]
     text = f"{row.get('title', '')} {name} {urlparse(row.get('url', '')).path}"
@@ -231,8 +249,9 @@ def verify_links(links: list[dict], payer_alias: str, store: VerifyStore, max_li
             store.put(v)
             done += 1
             if classifier is not None and ins is not None and store.rows[v.url_key]["verdict"] == "ambiguous":
-                from .ai_review import settle                 # Gate 3: the crawler's local AI decides
-                store.put_row(settle(store.rows[v.url_key], ins, payer_alias, classifier))
+                from .ai_review import copy_sibling, settle   # Gate 3: the crawler's local AI decides
+                cur = store.rows[v.url_key]
+                store.put_row(copy_sibling(cur, store) or settle(cur, ins, payer_alias, classifier))
             row = store.rows[v.url_key]
             final = row["verdict"]
             if row.get("ai_verdict"):
