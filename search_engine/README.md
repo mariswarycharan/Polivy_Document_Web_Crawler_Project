@@ -57,3 +57,19 @@ Every step saves as it goes; running a command again continues where it stopped 
 - **robots.txt** follows the crawler's own setting on this branch (currently not enforced).
 - Verification uses the crawler's rule-based checks only; the crawler's local LLM is not called, so unclear
   cases are reported as *ambiguous* for a person to review.
+
+## Verification: strict review and local AI
+
+`verify` checks each search-only link with the crawler's own fetcher and rules, then:
+
+1. **Skips** careers / jobs links without fetching (`VERIFY_SKIP_*` in `config.py`).
+2. **Strict review** (search engine only): rejects authorization-to-release (HIPAA) forms, notices, corporate /
+   ESG / earnings reports, marketing, API docs, handbooks and prior-auth statistics; moves thin accepts to
+   ambiguous (`STRICT_*` in `config.py`). Re-applied to saved results on every load - no re-fetching.
+3. **Local AI** for ambiguous links: the crawler's own `LLMClassifier` (Ollama, `OLLAMA_MODEL` in
+   `crawler_config.py`) with the crawler's Gate 3 decision (AI confirms >= 0.5 -> accepted; otherwise the rule
+   override, otherwise rejected). New ambiguous links are decided straight away; ambiguous links from earlier runs
+   are fetched again and decided after the new ones. Answers are cached in
+   `output/llm_cache_search_engine.jsonl` (the crawler's database is never written). `--no-ai` turns it off.
+
+The Excel files show `crawler_verdict` / `crawler_reason` (before strict review) and the `ai_*` columns.

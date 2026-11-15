@@ -52,7 +52,9 @@ def collect(payer, source: str, limit: int, max_queries: int, archives=None, **k
     return rep
 
 
-def verify(payer, crawler_output=None, max_links=None) -> int:
+def verify(payer, crawler_output=None, max_links=None, use_ai=True) -> int:
+    """Check new search-only links (ambiguous ones go straight to the local AI), then let the AI settle
+    ambiguous links saved by earlier runs."""
     links = list(LinkStore(payer.name).rows.values())
     if not links:
         print(f"{payer.name}: no search links collected yet")
@@ -61,12 +63,24 @@ def verify(payer, crawler_output=None, max_links=None) -> int:
     store = VerifyStore(payer.name)
     left = sum(1 for r in c.search_only if r["url_key"] not in store.rows)
     print(f"== {payer.name}: {len(c.search_only)} search-only link(s), {left} not yet verified")
+    classifier = None
+    if use_ai:
+        from .ai_review import make_classifier
+        classifier, msg = make_classifier()
+        print(f"   {msg}" + ("" if classifier else " - ambiguous links stay ambiguous for now"))
     try:
-        n = verify_links(c.search_only, payer.alias or payer.name, store, max_links=max_links)
+        n = verify_links(c.search_only, payer.alias or payer.name, store, max_links=max_links, classifier=classifier)
     except NetworkDown as e:
         print(f"   STOPPED: {e}")
         return 0
     print(f"   checked {n} in this run")
+    if classifier is not None:
+        from .ai_review import review_ambiguous
+        old = [r for r in store.rows.values() if r.get("verdict") == "ambiguous" and not r.get("ai_verdict")]
+        if old:
+            print(f"== local AI review of {len(old)} ambiguous link(s) from earlier runs")
+            m = review_ambiguous(old, payer.alias or payer.name, store, classifier, max_links=max_links)
+            print(f"   settled {m} in this run")
     return n
 
 

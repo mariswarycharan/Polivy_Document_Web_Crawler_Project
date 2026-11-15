@@ -163,23 +163,10 @@ def cmd_compare(args) -> int:
 
 
 def cmd_verify(args) -> int:
-    from .compare import compare, load_crawler_view
-    from .verify import NetworkDown, VerifyStore, verify_links
+    from .pipeline import verify
     pairs = _payers_with_links(args)
-    for payer, links in pairs:
-        if not links:
-            print(f"{payer.name}: no search links collected yet")
-            continue
-        c = compare(payer.name, links, load_crawler_view(payer.name, args.crawler_output))
-        store = VerifyStore(payer.name)
-        left = sum(1 for r in c.search_only if r["url_key"] not in store.rows)
-        print(f"== {payer.name}: {len(c.search_only)} search-only link(s), {left} not yet verified")
-        try:
-            n = verify_links(c.search_only, payer.alias or payer.name, store, max_links=args.max)
-        except NetworkDown as e:
-            print(f"   STOPPED: {e}")
-            return 1
-        print(f"   checked {n} in this run")
+    for payer, _links in pairs:
+        verify(payer, args.crawler_output, args.max, use_ai=not args.no_ai)
     _write_gap(pairs, args.crawler_output)
     return 0
 
@@ -226,6 +213,8 @@ def main(argv=None) -> int:
         p.add_argument("--crawler-output", help="crawler output folder to compare with (default: this project's output/)")
         if name == "verify":
             p.add_argument("--max", type=int, default=None, help="check at most this many links per payer in this run")
+            p.add_argument("--no-ai", action="store_true",
+                           help="do not use the crawler's local AI (Ollama) for ambiguous links")
     rn = sub.add_parser("run", help="Phase 4: collect, compare, verify and write the Excel files in one go")
     g3 = rn.add_mutually_exclusive_group(required=True)
     g3.add_argument("--payer")

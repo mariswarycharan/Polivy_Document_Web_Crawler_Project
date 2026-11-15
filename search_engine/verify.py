@@ -138,7 +138,7 @@ def strict_review(row: dict) -> dict:
         if re.search(rx, text, re.I):
             row["verdict"], row["reason"] = "rejected", f"strict filter: {label}"
             return row
-    if base_v == "accepted":
+    if base_v == "accepted" and not row.get("ai_verdict"):     # an AI-settled accept is not sent back
         why = ""
         if row.get("file_type") in ("xls", "xlsx", "csv") and not row.get("content_score"):
             why = "spreadsheet accepted on its name only"
@@ -165,6 +165,13 @@ class VerifyStore:
                         continue
                     self.rows[v["url_key"]] = strict_review(v)
 
+    def put_row(self, row: dict) -> None:
+        """Save a full stored row (e.g. one the local AI settled); a later line for the same link wins on reload."""
+        self.rows[row["url_key"]] = strict_review(row)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
     def put(self, v: Verdict) -> None:
         self.rows[v.url_key] = strict_review(asdict(v))
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -173,7 +180,7 @@ class VerifyStore:
 
 
 def verify_links(links: list[dict], payer_alias: str, store: VerifyStore, max_links: int | None = None,
-                 fetcher=None, inspect=None, log=print) -> int:
+                 fetcher=None, inspect=None, log=print, classifier=None) -> int:
     """Verify links not yet in the store. Returns how many were checked in this run."""
     todo = [l for l in links if l["url_key"] not in store.rows]
     rest = []
@@ -221,8 +228,17 @@ def verify_links(links: list[dict], payer_alias: str, store: VerifyStore, max_li
             in_a_row = 0
             store.put(v)
             done += 1
-            final = store.rows[v.url_key]["verdict"]
-            note = "" if final == v.verdict else f" (crawler rules: {v.verdict}; {store.rows[v.url_key]['reason']})"
+            if classifier is not None and ins is not None and store.rows[v.url_key]["verdict"] == "ambiguous":
+                from .ai_review import settle                 # Gate 3: the crawler's local AI decides
+                store.put_row(settle(store.rows[v.url_key], ins, payer_alias, classifier))
+            row = store.rows[v.url_key]
+            final = row["verdict"]
+            if row.get("ai_verdict"):
+                note = f" (rules: ambiguous -> local AI: {row['ai_verdict']})"
+            elif final != v.verdict:
+                note = f" (crawler rules: {v.verdict}; {row['reason']})"
+            else:
+                note = ""
             log(f"  [{i}/{len(todo)}] {final:<11} {link['url'][:110]}{note}")
     finally:
         if own:
