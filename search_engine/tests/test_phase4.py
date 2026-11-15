@@ -35,3 +35,14 @@ def test_run_without_crawl_or_verification(monkeypatch):
     monkeypatch.setattr(pipeline, "write_reports", lambda ps, out: steps.append("reports"))
     pipeline.run(PAYERS, verify_max=0)
     assert steps == ["collect:archive", "reports"]
+
+
+def test_run_log_copies_output(tmp_path, monkeypatch):
+    import search_engine.config as cfg
+    from search_engine.__main__ import run_log
+    monkeypatch.setattr(cfg, "OUTPUT_DIR", tmp_path)
+    with run_log("verify", ["verify", "--payer", "X"]) as rl:
+        print("hello from the run")
+    text = rl.path.read_text(encoding="utf-8")
+    assert "hello from the run" in text and "--payer X" in text and "ended" in text
+    assert (tmp_path / "logs" / "latest_verify.log").read_text(encoding="utf-8") == text

@@ -230,8 +230,72 @@ def main(argv=None) -> int:
     rn.add_argument("--verify-max", type=int, default=200, help="links checked per payer (0 = none, -1 = all)")
     rn.add_argument("--crawler-output", help="crawler output folder to compare with (default: this project's output/)")
     args = ap.parse_args(argv)
-    return {"run": cmd_run, "check": cmd_check, "queries": cmd_queries, "sample": cmd_sample, "collect": cmd_collect,
-            "export": cmd_export, "compare": cmd_compare, "verify": cmd_verify}[args.cmd](args)
+    handler = {"run": cmd_run, "check": cmd_check, "queries": cmd_queries, "sample": cmd_sample, "collect": cmd_collect,
+            "export": cmd_export, "compare": cmd_compare, "verify": cmd_verify}[args.cmd]
+    if args.cmd in ("check", "queries", "sample"):
+        return handler(args)
+    with run_log(args.cmd, argv if argv is not None else sys.argv[1:]):
+        return handler(args)
+
+
+class _Tee:
+    """Writes to the terminal and to the run log at the same time."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, text):
+        for s in self.streams:
+            try:
+                s.write(text)
+            except Exception:
+                pass
+        return len(text)
+
+    def flush(self):
+        for s in self.streams:
+            try:
+                s.flush()
+            except Exception:
+                pass
+
+
+class run_log:
+    """Copies everything a run prints to search_engine/output/logs/<command>_<UTC time>.log (and latest_<command>.log)."""
+
+    def __init__(self, cmd: str, argv):
+        from datetime import datetime, timezone
+        from .config import OUTPUT_DIR
+        self.dir = OUTPUT_DIR / "logs"
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        self.path = self.dir / f"{cmd}_{stamp}.log"
+        self.latest = self.dir / f"latest_{cmd}.log"
+        self.header = f"$ python -m search_engine {' '.join(argv)}\nstarted {stamp}\n"
+
+    def __enter__(self):
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.fh = self.path.open("w", encoding="utf-8", buffering=1)
+        self.fh.write(self.header)
+        self.old_out, self.old_err = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = _Tee(self.old_out, self.fh), _Tee(self.old_err, self.fh)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        import traceback
+        from datetime import datetime, timezone
+        if exc_type is KeyboardInterrupt:
+            self.fh.write("\nSTOPPED by Ctrl+C\n")
+        elif exc_type is not None:
+            self.fh.write("\n" + "".join(traceback.format_exception(exc_type, exc, tb)))
+        self.fh.write(f"ended {datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}\n")
+        sys.stdout, sys.stderr = self.old_out, self.old_err
+        self.fh.close()
+        try:
+            self.latest.write_text(self.path.read_text(encoding="utf-8"), encoding="utf-8")
+        except OSError:
+            pass
+        print(f"(log saved: {self.path})")
+        return False
 
 
 if __name__ == "__main__":
