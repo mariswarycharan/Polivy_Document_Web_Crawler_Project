@@ -104,6 +104,13 @@ STRICT_REJECT_PATTERNS = {
     "system / claims-submission notice (not policy)":
         r"claim[\s_-]*form|moneygram|power[\s_-]*acc|contributions|discharge[\s_-]*form|treatment[\s_-]*report|"
         r"path[\s_-]*toward|cdt[\s_-]*\d{2}[\s_-]*updates|\bevv\b|_evv|evv_|evv[a-z]|training[\s_-]*guide|companion[\s_-]*(document|guide)|837[ip]?\b",
+    "premium rate filing (not coverage policy)": r"rate[\s_-]*justification|ratejustification|rate[\s_-]*fil|ratereview",
+    "HEDIS / quality-measure coding guide (not coverage policy)": r"hedis|ecds|coding[\s_-]*booklet",
+    "member newsletter / engagement / one-pager":
+        r"make[\s_-]*health[\s_-]*happen|digital[\s_-]*engagement|one[\s_-]?pager|onepager|dental[\s_-]*benefits",
+    "corporate compliance / fraud policy (not coverage policy)":
+        r"compliance[\s_-]*investigation|complianceinvestigation|fraud|waste[\s_-]*fraud",
+    "appeal form / appeal rights": r"appeal",
     "training / presentation / program promotion":
         r"training[\s_-]*academy|presentation|recognition[\s_-]*program|healthy[\s_-]*rewards|legislative[\s_-]*report|"
         r"nadac|regional[\s_-]*manager[\s_-]*map|patient[\s_-]*360|comparison[\s_-]*chart",
