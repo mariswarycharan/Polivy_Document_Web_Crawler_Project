@@ -111,6 +111,13 @@ STRICT_REJECT_PATTERNS = {
     "corporate compliance / fraud policy (not coverage policy)":
         r"compliance[\s_-]*investigation|complianceinvestigation|fraud|waste[\s_-]*fraud",
     "appeal form / appeal rights": r"appeal",
+    "member notice / certificate / plan-change letter":
+        r"certificate|plan[\s_-]*changes|planchanges|preventive[\s_-]*care[\s_-]*schedule|needs[\s_-]*new[\s_-]*providers|"
+        r"health[\s_-]*advisory|designation[\s_-]*of[\s_-]*representative",
+    "provider admin form / guide (not prior authorization)":
+        r"talking[\s_-]*points|overpayment|critical[\s_-]*incident|conflict[\s_-]*of[\s_-]*interest|instruction[\s_-]*letter|"
+        r"referral[\s_-]*form|tutorial|quick[\s_-]*ref|quickref|qrg\b|qrg\.|annual[\s_-]*review[\s_-]*report|glide[\s_-]*path|"
+        r"territory[\s_-]*listing|availity",
     "training / presentation / program promotion":
         r"training[\s_-]*academy|presentation|recognition[\s_-]*program|healthy[\s_-]*rewards|legislative[\s_-]*report|"
         r"nadac|regional[\s_-]*manager[\s_-]*map|patient[\s_-]*360|comparison[\s_-]*chart",
