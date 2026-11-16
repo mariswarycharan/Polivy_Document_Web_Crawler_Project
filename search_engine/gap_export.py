@@ -1,7 +1,7 @@
 """Phase 3c: writes the comparison and verification results.
 
-  output/search_gap_analysis.xlsx  - summary per payer + every group in its own sheet
-  output/search_engine_results.xlsx - the final result: verified policy documents the crawler did not find
+  output/results/search_gap_analysis.xlsx  - summary per payer + every group in its own sheet
+  output/results/search_engine_results.xlsx - the final result: verified policy documents the crawler did not find
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
 from .compare import Comparison
-from .config import OUTPUT_DIR
+from .config import RESULTS_DIR
 from .excel_export import _clean
 
 RESULT_COLS = ["payer", "url", "title", "document_type", "file_type", "confidence", "content_score", "link_score",
@@ -47,7 +47,7 @@ def _merge(row: dict, verdict: dict | None) -> dict:
     return out
 
 
-def export(comparisons: list[Comparison], verified: dict[str, dict[str, dict]], out_dir: Path = OUTPUT_DIR) -> tuple[Path, Path]:
+def export(comparisons: list[Comparison], verified: dict[str, dict[str, dict]], out_dir: Path = RESULTS_DIR) -> tuple[Path, Path]:
     """verified: payer -> url_key -> verdict dict."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -90,6 +90,20 @@ def export(comparisons: list[Comparison], verified: dict[str, dict[str, dict]], 
     by_ai = [r for r in groups["new_policy_documents"] if r.get("ai_verdict")]
     _sheet(res, "confirmed_by_rules", RESULT_COLS, by_rules)        # crawler rules accepted on their own
     _sheet(res, "accepted_by_local_AI", RESULT_COLS, by_ai)         # rules unsure, the local AI said yes - check these
+    import re
+    from .verify import POLICY_LIKE_URL, unreachable_category
+    unreach = []
+    for r in groups["search_only_other"]:
+        if r["verdict"] != "unreachable":
+            continue
+        cd = str(r.get("capture_date") or "")
+        unreach.append(dict(r, category=unreachable_category(r.get("reason", "")),
+                            looks_like_policy="yes" if re.search(POLICY_LIKE_URL, r["url"], re.I) else "",
+                            archived_copy=f"https://web.archive.org/web/{cd or '2'}/{r['url']}"))
+    unreach.sort(key=lambda r: (r["category"], r["looks_like_policy"] != "yes", r["url"]))
+    _sheet(res, "unreachable", ["payer", "category", "looks_like_policy", "url", "reason", "http_status", "capture_date",
+                                "archived_copy", "title", "url_key"], unreach,
+           {"category": 46, "looks_like_policy": 12, "reason": 50, "archived_copy": 70})
     final = out_dir / "search_engine_results.xlsx"
     res.save(final)
     return gap, final

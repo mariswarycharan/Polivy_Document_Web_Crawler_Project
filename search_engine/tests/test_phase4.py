@@ -40,7 +40,7 @@ def test_run_without_crawl_or_verification(monkeypatch):
 def test_run_log_copies_output(tmp_path, monkeypatch):
     import search_engine.config as cfg
     from search_engine.__main__ import run_log
-    monkeypatch.setattr(cfg, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "LOGS_DIR", tmp_path / "logs")
     with run_log("verify", ["verify", "--payer", "X"]) as rl:
         print("hello from the run")
     text = rl.path.read_text(encoding="utf-8")

@@ -55,7 +55,7 @@ def test_excel_has_links_and_summary(tmp_path):
     st.add("https://www.centene.com/a.pdf", "commoncrawl", kind="docs", title="Bad\x0bchar")
     st.add("https://www.centene.com/policies/b.html", "searxng", kind="pages")
     st.save()
-    wb = load_workbook(export(tmp_path))
+    wb = load_workbook(export(tmp_path, links_dir=tmp_path))
     assert wb.sheetnames == ["links", "summary"]
     assert wb["links"].max_row == 3
     assert [c.value for c in wb["summary"][2]] == ["Centene", 2, 1, 0, 1, 0, 1, 1]

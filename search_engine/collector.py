@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import archive_client
-from .config import DOCUMENT_EXTENSIONS, ARCHIVE_LIMIT_PER_DOMAIN, ARCHIVE_SOURCES, OUTPUT_DIR, SEARXNG_BATCH_QUERIES, SEARXNG_MAX_PAGES
+from .config import DOCUMENT_EXTENSIONS, ARCHIVE_LIMIT_PER_DOMAIN, ARCHIVE_SOURCES, LINKS_DIR, SEARXNG_BATCH_QUERIES, SEARXNG_MAX_PAGES
 from .payers import Payer
 from .query_builder import build_queries
 from .searxng_client import SearxClient
@@ -29,7 +29,7 @@ class CollectReport:
     searxng_stopped: str = ""          # why the batch stopped early (CAPTCHA, suspended, unreachable)
 
 
-def archive_progress_path(payer: Payer, out_dir: Path = OUTPUT_DIR) -> Path:
+def archive_progress_path(payer: Payer, out_dir: Path = LINKS_DIR) -> Path:
     return Path(out_dir) / f"archive_progress_{slug(payer.name)}.json"
 
 
@@ -74,7 +74,7 @@ def _progress_path(payer: Payer, out_dir: Path) -> Path:
 
 def collect_searxng(payer: Payer, store: LinkStore, report: CollectReport, client: SearxClient | None = None,
                     max_queries: int = SEARXNG_BATCH_QUERIES, max_pages: int = SEARXNG_MAX_PAGES,
-                    out_dir: Path = OUTPUT_DIR, log=print) -> None:
+                    out_dir: Path = LINKS_DIR, log=print) -> None:
     """Run the next batch of not-yet-done queries. Stops at once when the engine shows a CAPTCHA,
     is suspended, or SearXNG cannot be reached; the next run continues from the same point."""
     prog_path = _progress_path(payer, out_dir)

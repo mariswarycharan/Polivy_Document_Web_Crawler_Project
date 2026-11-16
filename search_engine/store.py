@@ -8,7 +8,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config import OUTPUT_DIR
+from .config import LINKS_DIR
 
 FIELDS = ["payer", "url", "url_key", "sources", "kind", "mime", "title", "snippet", "query", "engine",
           "capture_date", "found_at"]
@@ -28,7 +28,7 @@ def url_key(url: str) -> str:
 
 
 class LinkStore:
-    def __init__(self, payer: str, out_dir: Path = OUTPUT_DIR) -> None:
+    def __init__(self, payer: str, out_dir: Path = LINKS_DIR) -> None:
         self.payer = payer
         self.path = Path(out_dir) / f"links_{slug(payer)}.jsonl"
         self.rows: dict[str, dict] = {}
@@ -65,7 +65,7 @@ class LinkStore:
         tmp.replace(self.path)
 
 
-def load_all(out_dir: Path = OUTPUT_DIR) -> list[dict]:
+def load_all(out_dir: Path = LINKS_DIR) -> list[dict]:
     rows = []
     for p in sorted(Path(out_dir).glob("links_*.jsonl")):
         for line in p.read_text(encoding="utf-8").splitlines():

@@ -52,7 +52,7 @@ def collect(payer, source: str, limit: int, max_queries: int, archives=None, **k
     return rep
 
 
-def verify(payer, crawler_output=None, max_links=None, use_ai=True) -> int:
+def verify(payer, crawler_output=None, max_links=None, use_ai=True, retry_transient=False) -> int:
     """Check new search-only links (ambiguous ones go straight to the local AI), then let the AI settle
     ambiguous links saved by earlier runs."""
     links = list(LinkStore(payer.name).rows.values())
@@ -60,9 +60,10 @@ def verify(payer, crawler_output=None, max_links=None, use_ai=True) -> int:
         print(f"{payer.name}: no search links collected yet")
         return 0
     c = compare(payer.name, links, load_crawler_view(payer.name, crawler_output))
-    store = VerifyStore(payer.name)
+    store = VerifyStore(payer.name, retry_transient=retry_transient)
     left = sum(1 for r in c.search_only if r["url_key"] not in store.rows)
-    print(f"== {payer.name}: {len(c.search_only)} search-only link(s), {left} not yet verified")
+    print(f"== {payer.name}: {len(c.search_only)} search-only link(s), {left} not yet verified"
+          + (" (temporary failures included again)" if retry_transient else ""))
     classifier = None
     if use_ai:
         from .ai_review import make_classifier

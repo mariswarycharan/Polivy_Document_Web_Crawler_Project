@@ -40,12 +40,16 @@ Every step saves as it goes; running a command again continues where it stopped 
 
 ## Outputs (`search_engine\output\`)
 
-| File | Contents |
+| Folder / file | Contents |
 | --- | --- |
-| `search_links.xlsx` | Every link found, with its sources; plus a per-payer summary |
-| `search_gap_analysis.xlsx` | Summary per payer (overlap %, why links were missed) and one sheet per group |
-| `search_engine_results.xlsx` | **Final result:** verified policy documents the crawler did not find |
-| `links_<payer>.jsonl`, `verified_<payer>.jsonl`, `searxng_progress_<payer>.json` | Working data for resuming |
+| `results\search_engine_results.xlsx` | **Final result:** verified policy documents the crawler did not find - sheets `confirmed_by_rules`, `accepted_by_local_AI` (check these), and `unreachable` (links that could not be checked, grouped by why, with an archived-copy link) |
+| `results\search_gap_analysis.xlsx` | Summary per payer (overlap %, why links were missed) and one sheet per group |
+| `results\search_links.xlsx` | Every link found, with its sources; plus a per-payer summary |
+| `links\` | `links_<payer>.jsonl` (collected links) and `archive_progress_` / `searxng_progress_<payer>.json` (resume points) |
+| `verified\` | `verified_<payer>.jsonl` (one result per checked link) and `llm_cache_search_engine.jsonl` (saved local-AI answers) |
+| `logs\` | Full terminal output of every run; `latest_<command>.log` is the most recent |
+
+`verify --retry-transient` re-checks links that failed with a timeout or server error (5xx).
 
 ## Known limits
 
@@ -70,6 +74,6 @@ Every step saves as it goes; running a command again continues where it stopped 
    `crawler_config.py`) with the crawler's Gate 3 decision (AI confirms >= 0.5 -> accepted; otherwise the rule
    override, otherwise rejected). New ambiguous links are decided straight away; ambiguous links from earlier runs
    are fetched again and decided after the new ones. Answers are cached in
-   `output/llm_cache_search_engine.jsonl` (the crawler's database is never written). `--no-ai` turns it off.
+   `output/verified/llm_cache_search_engine.jsonl` (the crawler's database is never written). `--no-ai` turns it off.
 
 The Excel files show `crawler_verdict` / `crawler_reason` (before strict review) and the `ai_*` columns.

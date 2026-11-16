@@ -6,6 +6,10 @@ from pathlib import Path
 
 MODULE_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = MODULE_DIR / "output"
+RESULTS_DIR = OUTPUT_DIR / "results"     # the Excel files to review: results, gap analysis, all links
+LINKS_DIR = OUTPUT_DIR / "links"         # collected links per payer + collection progress (resume points)
+VERIFIED_DIR = OUTPUT_DIR / "verified"   # verification results per payer + the local-AI answer cache
+LOGS_DIR = OUTPUT_DIR / "logs"           # terminal output of every run
 
 # --------------------------------------------------------------------------- SearXNG (keyword search)
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://127.0.0.1:8888")

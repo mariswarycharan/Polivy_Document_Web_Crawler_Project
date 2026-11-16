@@ -1,7 +1,7 @@
 """Phase 3c: settles "ambiguous" verdicts with the crawler's own local AI (Ollama), the way the crawler does.
 
 The crawler's LLMClassifier (crawler_state.py) is reused unchanged; only its answer cache is ours
-(output/llm_cache_search_engine.jsonl), so the crawler's database is never written. The decision after the AI
+(output/verified/llm_cache_search_engine.jsonl), so the crawler's database is never written. The decision after the AI
 answer mirrors the crawler's Gate 3 (payer_policy_crawler.py):
 
   * AI says policy document with confidence >= 0.5            -> accepted
@@ -19,7 +19,7 @@ import json
 import threading
 from pathlib import Path
 
-from .config import OUTPUT_DIR
+from .config import VERIFIED_DIR
 
 AI_ACCEPT_MIN_CONFIDENCE = 0.5          # same threshold as the crawler
 
@@ -51,7 +51,7 @@ class JsonCache:
                 fh.write(json.dumps({"k": key, "v": value}, ensure_ascii=False) + "\n")
 
 
-def make_classifier(out_dir: Path = OUTPUT_DIR):
+def make_classifier(out_dir: Path = VERIFIED_DIR):
     """The crawler's LLMClassifier with our cache. Returns (classifier, message); classifier is None when
     USE_LLM is off in crawler_config.py, Ollama is not running, or the model is not pulled."""
     try:

@@ -1,4 +1,4 @@
-"""Writes search_engine/output/search_links.xlsx from all per-payer link stores."""
+"""Writes search_engine/output/results/search_links.xlsx from all per-payer link stores."""
 from __future__ import annotations
 
 from collections import Counter, defaultdict
@@ -8,7 +8,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
-from .config import OUTPUT_DIR
+from .config import LINKS_DIR, RESULTS_DIR
 from .store import load_all
 
 COLUMNS = ["payer", "url", "sources", "kind", "mime", "title", "snippet", "query", "engine", "capture_date",
@@ -22,8 +22,8 @@ def _clean(v) -> str:
     return "".join(ch for ch in s if ch in "\t\n" or ord(ch) >= 32)[:32000]   # Excel rejects control characters
 
 
-def export(out_dir: Path = OUTPUT_DIR) -> Path:
-    rows = sorted(load_all(out_dir), key=lambda r: (r["payer"], r["url"]))
+def export(out_dir: Path = RESULTS_DIR, links_dir: Path = LINKS_DIR) -> Path:
+    rows = sorted(load_all(links_dir), key=lambda r: (r["payer"], r["url"]))
     wb = Workbook()
     ws = wb.active
     ws.title = "links"

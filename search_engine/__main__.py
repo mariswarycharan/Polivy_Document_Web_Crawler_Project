@@ -166,7 +166,7 @@ def cmd_verify(args) -> int:
     from .pipeline import verify
     pairs = _payers_with_links(args)
     for payer, _links in pairs:
-        verify(payer, args.crawler_output, args.max, use_ai=not args.no_ai)
+        verify(payer, args.crawler_output, args.max, use_ai=not args.no_ai, retry_transient=args.retry_transient)
     _write_gap(pairs, args.crawler_output)
     return 0
 
@@ -191,7 +191,7 @@ def main(argv=None) -> int:
     q.add_argument("--show", type=int, default=20)
     s = sub.add_parser("sample", help="run one query and a short archive listing for one payer")
     s.add_argument("--payer", required=True)
-    co = sub.add_parser("collect", help="Phase 2: collect links into search_engine/output/search_links.xlsx")
+    co = sub.add_parser("collect", help="Phase 2: collect links into search_engine/output/results/search_links.xlsx")
     g = co.add_mutually_exclusive_group(required=True)
     g.add_argument("--payer", help="payer name or domain")
     g.add_argument("--all", action="store_true", help="every payer in the crawler's registry")
@@ -215,6 +215,8 @@ def main(argv=None) -> int:
             p.add_argument("--max", type=int, default=None, help="check at most this many links per payer in this run")
             p.add_argument("--no-ai", action="store_true",
                            help="do not use the crawler's local AI (Ollama) for ambiguous links")
+            p.add_argument("--retry-transient", action="store_true",
+                           help="re-check links that failed with a timeout or server error (5xx) earlier")
     rn = sub.add_parser("run", help="Phase 4: collect, compare, verify and write the Excel files in one go")
     g3 = rn.add_mutually_exclusive_group(required=True)
     g3.add_argument("--payer")
@@ -265,8 +267,8 @@ class run_log:
 
     def __init__(self, cmd: str, argv):
         from datetime import datetime, timezone
-        from .config import OUTPUT_DIR
-        self.dir = OUTPUT_DIR / "logs"
+        from . import config
+        self.dir = config.LOGS_DIR
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         self.path = self.dir / f"{cmd}_{stamp}.log"
         self.latest = self.dir / f"latest_{cmd}.log"

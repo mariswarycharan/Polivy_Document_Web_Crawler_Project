@@ -2,7 +2,7 @@
 
 Verdicts: accepted (a policy document), rejected (not a policy document), ambiguous (mixed evidence -
 needs a human look; the crawler would ask its local LLM), unreachable (error, block, HTTP >= 400).
-Results are kept per payer in output/verified_<payer>.jsonl, so a later run continues where it stopped.
+Results are kept per payer in output/verified/verified_<payer>.jsonl, so a later run continues where it stopped.
 """
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .config import OUTPUT_DIR
+from .config import VERIFIED_DIR
 from .store import now_utc, slug
 
 # Errors that mean "this machine could not reach the site", not "the link is bad". They are never saved as
@@ -80,6 +80,31 @@ def clean_url(url: str) -> str:
         host = host.replace(".:", ":").rstrip(".")
         return urlunsplit((p.scheme, host, p.path, p.query, p.fragment))
     return url
+
+
+POLICY_LIKE_URL = (r"polic|guideline|criteria|formular|drug|prior|precert|clinical|cumg|medpolic|"
+                   r"_pa_|/pa/|coverage|necessity")
+
+
+def unreachable_category(reason: str) -> str:
+    """Groups an unreachable verdict's reason for the review sheet."""
+    r = reason or ""
+    if r.startswith(("HTTP 404", "HTTP 410")):
+        return "not found (404/410) - removed from the site"
+    if "retired" in r or "redirects" in r or "own host answered" in r:
+        return "retired host / dead redirect"
+    if "403" in r or "bot_" in r or "challenge" in r or "forbidden" in r:
+        return "403 - geo-restricted or blocked by the site"
+    if is_transient(r):
+        return "temporary (timeout / server error) - retry with --retry-transient"
+    return "other"
+
+
+def is_transient(reason: str) -> bool:
+    """Failures worth one more try: timeouts, dropped connections, 5xx, maintenance pages."""
+    r = reason or ""
+    return (r.startswith("HTTP 5") or "maintenance" in r or "Timeout" in r or r.startswith(("ReadError", "RemoteProtocolError",
+            "WriteError", "PoolTimeout"))) and "retired" not in r
 
 
 def network_ok(fetcher, probe_url: str) -> bool:
@@ -196,7 +221,8 @@ def strict_review(row: dict) -> dict:
 
 
 class VerifyStore:
-    def __init__(self, payer: str, out_dir: Path = OUTPUT_DIR) -> None:
+    def __init__(self, payer: str, out_dir: Path = VERIFIED_DIR, retry_transient: bool = False) -> None:
+        """retry_transient=True leaves out links that failed with a timeout / 5xx, so the next verify re-checks them."""
         self.path = Path(out_dir) / f"verified_{slug(payer)}.jsonl"
         self.rows: dict[str, dict] = {}
         if self.path.exists():
@@ -206,6 +232,9 @@ class VerifyStore:
                     r = v.get("reason", "")
                     if v.get("verdict") == "unreachable" and is_network_error(r) and ": " not in r:
                         self.rows.pop(v["url_key"], None)       # connection failure: retry it next run
+                        continue
+                    if retry_transient and v.get("verdict") == "unreachable" and is_transient(v.get("reason", "")):
+                        self.rows.pop(v["url_key"], None)       # asked to re-check temporary failures
                         continue
                     self.rows[v["url_key"]] = strict_review(v)
 

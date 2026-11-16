@@ -102,9 +102,9 @@ upstream engines (DuckDuckGo, Brave, Mojeek, Google, Bing ...), then merges the 
 - **Phase 2 - built, waiting for a first real run.** `python -m search_engine collect --payer <name>` (or `--all`):
   - archive indexes: two filtered passes per domain and source (documents; policy-looking web pages);
   - SearXNG: the next batch of queries (15 by default); the batch stops at the first CAPTCHA, suspension or
-    connection error, and the next run continues where it stopped (`output/searxng_progress_<payer>.json`);
-  - links stored per payer in `output/links_<payer>.jsonl`, one row per crawler `url_key`, all sources listed;
-  - `output/search_links.xlsx` rebuilt after every run: sheet `links` and sheet `summary`.
+    connection error, and the next run continues where it stopped (`output/links/searxng_progress_<payer>.json`);
+  - links stored per payer in `output/links/links_<payer>.jsonl`, one row per crawler `url_key`, all sources listed;
+  - `output/results/search_links.xlsx` rebuilt after every run: sheet `links` and sheet `summary`.
 - **Phase 3 - built (14 Nov 2026).**
   - `python -m search_engine compare --all` (no network): reads the crawler's `output/output.csv` and its checkpoint
     database, and splits every search link into **found by both**, **seen by crawler but not output** (with the
@@ -112,9 +112,9 @@ upstream engines (DuckDuckGo, Brave, Mojeek, Google, Bing ...), then merges the 
     finished, or not linked from any visited page).
   - `python -m search_engine verify --payer <name> [--max N]`: fetches each search-only link with the crawler's own
     fetcher and judges it with the crawler's own rules -> accepted / rejected / ambiguous / unreachable. Results are
-    kept in `output/verified_<payer>.jsonl`, so runs can be split and resumed.
-  - Outputs: `output/search_gap_analysis.xlsx` (summary, new_policy_documents, search_only_other, seen_by_crawler,
-    found_by_both) and the final result `output/search_engine_results.xlsx` (verified new policy documents only).
+    kept in `output/verified/verified_<payer>.jsonl`, so runs can be split and resumed.
+  - Outputs: `output/results/search_gap_analysis.xlsx` (summary, new_policy_documents, search_only_other, seen_by_crawler,
+    found_by_both) and the final result `output/results/search_engine_results.xlsx` (verified new policy documents only).
 - **Phase 4 - built (14 Nov 2026).** `python -m search_engine run --payer <name> | --all` runs the whole flow:
   optional crawler run (`--crawl`, the crawler is started unchanged as its own process), collection (archive, plus
   `--searxng` for a keyword batch), verification (`--verify-max`, default 200 per payer) and all Excel files.

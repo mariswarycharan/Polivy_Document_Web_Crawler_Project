@@ -107,7 +107,7 @@ def test_verification_resumes_and_gap_files_are_written(tmp_path):
     row = [x.value for x in wb["summary"][2]]
     assert row[:8] == [PAYER, 1, 5, 1, 100.0, 2, 2, 2]
     res = load_workbook(final)
-    assert res.sheetnames == ["confirmed_by_rules", "accepted_by_local_AI"]
+    assert res.sheetnames == ["confirmed_by_rules", "accepted_by_local_AI", "unreachable"]
     assert res["confirmed_by_rules"].max_row == 3 and res["accepted_by_local_AI"].max_row == 1
 
 
@@ -262,3 +262,17 @@ def test_trailing_dot_host_is_cleaned():
     from search_engine.verify import clean_url
     assert clean_url("https://www.anthem.com./a.pdf") == "https://www.anthem.com/a.pdf"
     assert clean_url("https://www.anthem.com/a.pdf") == "https://www.anthem.com/a.pdf"
+
+
+def test_unreachable_categories_and_transient_retry(tmp_path):
+    import json
+    from search_engine.verify import VerifyStore, is_transient, unreachable_category
+    assert unreachable_category("HTTP 404").startswith("not found")
+    assert unreachable_category("ConnectError: host www11.x.com cannot be reached while other sites can (retired host)").startswith("retired")
+    assert unreachable_category("forbidden_403").startswith("403")
+    assert unreachable_category("ReadTimeout").startswith("temporary") and is_transient("HTTP 502")
+    f = tmp_path / "verified_Test.jsonl"
+    f.write_text("\n".join(json.dumps({"url_key": k, "url": "https://x.com/" + k, "verdict": "unreachable", "reason": r})
+                           for k, r in (("a", "ReadTimeout"), ("b", "HTTP 404"), ("c", "maintenance_page"))) + "\n", encoding="utf-8")
+    assert set(VerifyStore("Test", out_dir=tmp_path).rows) == {"a", "b", "c"}
+    assert set(VerifyStore("Test", out_dir=tmp_path, retry_transient=True).rows) == {"b"}
