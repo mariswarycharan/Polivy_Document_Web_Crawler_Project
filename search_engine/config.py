@@ -118,6 +118,10 @@ STRICT_REJECT_PATTERNS = {
         r"talking[\s_-]*points|overpayment|critical[\s_-]*incident|conflict[\s_-]*of[\s_-]*interest|instruction[\s_-]*letter|"
         r"referral[\s_-]*form|tutorial|quick[\s_-]*ref|quickref|qrg\b|qrg\.|annual[\s_-]*review[\s_-]*report|glide[\s_-]*path|"
         r"territory[\s_-]*listing|availity",
+    "policy-site boilerplate (definitions / disclaimer page)": r"/(definitions|disclaimer)(/|\s|$)",
+    "FAQ / announcement / news / policy brief":
+        r"\bfaq|faq\b|faq\.|announcement|policy[\s_-]*brief|provider[\s_-]*news|providernews_|innovation|civicascript",
+    "emergency / COVID notice": r"covid|state[\s_-]*of[\s_-]*emergency|stateofemergency|proclamation",
     "training / presentation / program promotion":
         r"training[\s_-]*academy|presentation|recognition[\s_-]*program|healthy[\s_-]*rewards|legislative[\s_-]*report|"
         r"nadac|regional[\s_-]*manager[\s_-]*map|patient[\s_-]*360|comparison[\s_-]*chart",
