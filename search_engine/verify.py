@@ -71,6 +71,30 @@ def dead_redirect(fetcher, url: str, max_hops: int = 10) -> str:
     return "too many redirects"
 
 
+def clean_url(url: str) -> str:
+    """'https://www.anthem.com./x' -> 'https://www.anthem.com/x' (a trailing dot on the host fails to connect)."""
+    from urllib.parse import urlsplit, urlunsplit
+    p = urlsplit(url)
+    host = p.netloc
+    if host.endswith(".") or ".:" in host:
+        host = host.replace(".:", ":").rstrip(".")
+        return urlunsplit((p.scheme, host, p.path, p.query, p.fragment))
+    return url
+
+
+def network_ok(fetcher, probe_url: str) -> bool:
+    """Is the network up? Asks a site that answered earlier in this run (its robots.txt, no redirects)."""
+    client = getattr(fetcher, "client", None)
+    if client is None or not probe_url:
+        return False
+    try:
+        r = client.get(probe_url, follow_redirects=False)
+        r.close()
+        return True
+    except Exception:
+        return False
+
+
 def skip_reason(url: str) -> str:
     """Why a link is not worth fetching (never a policy document), or ''."""
     from urllib.parse import urlparse
@@ -224,19 +248,35 @@ def verify_links(links: list[dict], payer_alias: str, store: VerifyStore, max_li
         fetcher = Fetcher()
     if inspect is None:
         from crawler_io import inspect_content as inspect
+    from urllib.parse import urlparse
     in_a_row, done = 0, 0
+    probe, dead_hosts = "", set()          # probe = robots.txt of a host that answered; hosts known to be gone
     try:
         for i, link in enumerate(todo, 1):
-            r = fetcher.fetch(link["url"])
+            host = (urlparse(clean_url(link["url"])).hostname or "").lower()
+            if host in dead_hosts:          # retired host already confirmed in this run: no fetch, no wait
+                store.put(Verdict(url_key=link["url_key"], url=link["url"], verdict="unreachable",
+                                  reason=f"ConnectError: host {host} cannot be reached while other sites can "
+                                         "(retired host)", checked_at=now_utc()))
+                done += 1
+                log(f"  [{i}/{len(todo)}] unreachable retired host {host}  {link['url'][:80]}")
+                continue
+            r = fetcher.fetch(clean_url(link["url"]))
             ins = None
             if not (r.error or r.blocked or not r.status or r.status >= 400):
                 ins = inspect(r.content, r.content_type, r.final_url or link["url"], payer_alias)
             v = judge(link, r, ins)
+            if r.status:                              # this host answered: use it to test the network later
+                p = urlparse(r.final_url or clean_url(link["url"]))
+                probe = f"{p.scheme}://{p.netloc}/robots.txt"
             if v.verdict == "unreachable" and is_network_error(v.reason):
-                dead = dead_redirect(fetcher, link["url"])
+                dead = dead_redirect(fetcher, clean_url(link["url"]))
                 if dead:                              # the site answered: a dead link, not a network problem
                     v.reason = f"{v.reason}: {dead}"
                     v.verdict = "unreachable"
+                elif network_ok(fetcher, probe):      # other sites answer: this host is gone, not the network
+                    dead_hosts.add(host)
+                    v.reason = f"{v.reason}: host {host} cannot be reached while other sites can (retired host)"
             if v.verdict == "unreachable" and is_network_error(v.reason) and ": " not in v.reason:
                 in_a_row += 1
                 log(f"  [{i}/{len(todo)}] no connection ({v.reason}) - not saved, will retry {link['url'][:90]}")

@@ -206,3 +206,59 @@ def test_strict_review_rejects_and_downgrades():
     dental = dict(good, url="https://x.com/forms/MULTI-WP-dental-claims-submission.pdf", title="Dental")
     assert strict_review(dental)["verdict"] == "accepted"
     assert strict_review(dict(acc, verdict="unreachable"))["verdict"] == "unreachable"
+
+
+def _mixed_fetcher(network_up=True):
+    from types import SimpleNamespace
+
+    class Client:
+        def get(self, url, follow_redirects=True):
+            if "www11." in url or not network_up and "good." in url:
+                raise OSError("getaddrinfo failed")
+            return SimpleNamespace(status_code=200, headers={}, close=lambda: None)
+
+    class F:
+        client = Client()
+        calls = []
+
+        def fetch(self, url):
+            F.calls.append(url)
+            if "www11." in url:
+                return SimpleNamespace(error="ConnectError", blocked="", status=0, final_url="", content=b"",
+                                       content_type="")
+            return SimpleNamespace(error="", blocked="", status=404, final_url=url, content=b"", content_type="")
+
+        def close(self):
+            pass
+    return F()
+
+
+def test_retired_host_does_not_stop_the_run(tmp_path):
+    from search_engine.verify import VerifyStore, verify_links
+    links = [{"url_key": "good.com/a", "url": "https://good.com/a", "capture_date": "20250101"}] + \
+            [{"url_key": f"www11.x.com/{i}", "url": f"https://www11.x.com/{i}.pdf", "capture_date": "20240101"}
+             for i in range(15)]
+    store = VerifyStore("Test", out_dir=tmp_path)
+    f = _mixed_fetcher()
+    assert verify_links(links, "Test", store, fetcher=f, inspect=lambda *a: None, log=lambda *_: None) == 16
+    row = store.rows["www11.x.com/3"]
+    assert row["verdict"] == "unreachable" and "retired host" in row["reason"]
+    assert sum("www11." in u for u in f.calls) == 1               # later links on that host are not fetched
+    assert "www11.x.com/3" in VerifyStore("Test", out_dir=tmp_path).rows   # saved, not retried
+
+
+def test_real_outage_still_stops(tmp_path):
+    import pytest
+    from search_engine.verify import NetworkDown, VerifyStore, verify_links
+    links = [{"url_key": "good.com/a", "url": "https://good.com/a", "capture_date": "20250101"}] + \
+            [{"url_key": f"www11.x.com/{i}", "url": f"https://www11.x.com/{i}.pdf", "capture_date": "20240101"}
+             for i in range(15)]
+    with pytest.raises(NetworkDown):
+        verify_links(links, "Test", VerifyStore("Test", out_dir=tmp_path), fetcher=_mixed_fetcher(network_up=False),
+                     inspect=lambda *a: None, log=lambda *_: None)
+
+
+def test_trailing_dot_host_is_cleaned():
+    from search_engine.verify import clean_url
+    assert clean_url("https://www.anthem.com./a.pdf") == "https://www.anthem.com/a.pdf"
+    assert clean_url("https://www.anthem.com/a.pdf") == "https://www.anthem.com/a.pdf"
